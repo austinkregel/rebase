@@ -1,0 +1,94 @@
+@import 'tailwindcss';
+
+/* Design tokens → Tailwind utilities (bg-bg, text-fg, border-line, text-accent, …). */
+@theme {
+  --color-bg: #0d1117;
+  --color-surface: #10161d;
+  --color-elevated: #161d27;
+  --color-hover: #1a222d;
+  --color-active: #1f2937;
+  --color-line: #232b36;
+  --color-fg: #d4dae2;
+  --color-muted: #9aa6b2;
+  --color-subtle: #5e6a76;
+  --color-accent: #7aa2f7;
+  --color-green: #9ece6a;
+  --color-yellow: #e0af68;
+  --color-red: #f7768e;
+  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+}
+
+/* Legacy CSS variables (kept for scoped styles + the dockview theme during the
+   migration to utility classes). Same values as the @theme tokens above. */
+:root {
+  --bg: #0d1117;
+  --bg-panel: #10161d;
+  --bg-input: #161d27;
+  --bg-hover: #1a222d;
+  --bg-active: #1f2937;
+  --border: #232b36;
+  --fg: #d4dae2;
+  --fg-muted: #9aa6b2;
+  --fg-subtle: #5e6a76;
+  --accent: #7aa2f7;
+  --green: #9ece6a;
+  --yellow: #e0af68;
+  --red: #f7768e;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-subtle);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Dockview theme tuned to the rebase palette (overrides the abyss base). */
+.dockview-theme-abyss {
+  --dv-background-color: var(--bg);
+  --dv-group-view-background-color: var(--bg);
+  --dv-tabs-and-actions-container-background-color: var(--bg-panel);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--bg);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--bg-panel);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--bg-panel);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--bg-panel);
+  --dv-tab-divider-color: var(--border);
+  --dv-separator-border: var(--border);
+  --dv-paneview-active-outline-color: var(--accent);
+  --dv-active-sash-color: var(--accent);
+  --dv-activegroup-visiblepanel-tab-color: var(--fg);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--fg-subtle);
+  --dv-tabs-container-scrollbar-color: var(--border);
+  font-family: inherit;
+}
