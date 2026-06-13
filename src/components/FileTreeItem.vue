@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { ChevronRightIcon, FolderIcon, FolderOpenIcon, DocumentIcon } from '@heroicons/vue/20/solid'
 import { useFilesStore } from '@/stores/files'
 import { joinPath } from '@/services/paths'
 import { openContextMenu, type ContextMenuItem } from '@/services/contextMenu'
+import { menuItemsFor } from '@/services/menus'
 import { confirm } from '@/services/confirm'
+import InlineInput from './ui/InlineInput.vue'
 import type { DirListEntry } from '@/transport/types'
 
 const props = defineProps<{
@@ -12,9 +14,6 @@ const props = defineProps<{
   parentPath: string
   entry: DirListEntry
   depth: number
-  /** Optional extra context-menu items for folders, built by the host
-   *  (e.g. the File explorer's "Add to Project as Root"). */
-  folderMenu?: (path: string) => ContextMenuItem[]
 }>()
 
 const files = useFilesStore()
@@ -27,11 +26,9 @@ const children = computed(() => files.tree[path.value])
 const isActive = computed(() => files.activePath === path.value)
 const isOpen = computed(() => files.openFiles.some((f) => f.path === path.value))
 
-// --- inline edit state ---
+// --- inline edit state (the inputs themselves are <InlineInput>) ---
 const renaming = ref(false)
 const creating = ref<null | 'file' | 'folder'>(null)
-const nameInput = ref('')
-const inputEl = ref<HTMLInputElement | null>(null)
 
 async function activate() {
   error.value = null
@@ -43,24 +40,11 @@ async function activate() {
   }
 }
 
-async function focusInput() {
-  await nextTick()
-  inputEl.value?.focus()
-  inputEl.value?.select()
-}
-
 function report(err: unknown) {
   error.value = err instanceof Error ? err.message : String(err)
 }
 
-async function startRename() {
-  nameInput.value = props.entry.name
-  renaming.value = true
-  await focusInput()
-}
-
-async function commitRename() {
-  const name = nameInput.value.trim()
+async function commitRename(name: string) {
   renaming.value = false
   if (!name || name === props.entry.name) return
   try {
@@ -72,13 +56,10 @@ async function commitRename() {
 
 async function startCreate(kind: 'file' | 'folder') {
   if (!isExpanded.value) await files.toggleDir(props.clientId, path.value).catch(() => {})
-  nameInput.value = ''
   creating.value = kind
-  await focusInput()
 }
 
-async function commitCreate() {
-  const name = nameInput.value.trim()
+async function commitCreate(name: string) {
   const kind = creating.value
   creating.value = null
   if (!name || !kind) return
@@ -106,17 +87,19 @@ async function doDelete() {
 }
 
 function onContextMenu(event: MouseEvent) {
+  const ctx = { clientId: props.clientId, path: path.value, name: props.entry.name, isDir: isDir.value }
   const items: ContextMenuItem[] = isDir.value
     ? [
         { label: 'New File', action: () => void startCreate('file') },
         { label: 'New Folder', action: () => void startCreate('folder') },
-        { label: 'Rename', action: () => void startRename() },
-        ...(props.folderMenu?.(path.value) ?? []),
+        { label: 'Rename', action: () => (renaming.value = true) },
+        ...menuItemsFor('folder/context', ctx),
         { label: 'Delete', action: () => void doDelete(), danger: true, separator: true },
       ]
     : [
         { label: 'Open', action: () => void activate() },
-        { label: 'Rename', action: () => void startRename() },
+        { label: 'Rename', action: () => (renaming.value = true) },
+        ...menuItemsFor('file/context', ctx),
         { label: 'Delete', action: () => void doDelete(), danger: true, separator: true },
       ]
   openContextMenu(event, items)
@@ -128,25 +111,21 @@ function onContextMenu(event: MouseEvent) {
     <!-- inline rename replaces the row label -->
     <div
       v-if="renaming"
-      class="flex items-center gap-1.5 py-[3px] pr-2"
+      class="flex items-center gap-1.5 py-0.5 pr-2"
       :style="{ paddingLeft: `${8 + depth * 14}px` }"
     >
       <span class="size-3 shrink-0" />
-      <component :is="isDir ? FolderIcon : DocumentIcon" class="size-3.5 shrink-0 text-subtle" />
-      <input
-        ref="inputEl"
-        v-model="nameInput"
-        class="min-w-0 flex-1 rounded border border-accent bg-elevated px-1 text-[12.5px] text-fg outline-none"
-        spellcheck="false"
-        @keydown.enter.prevent="commitRename"
-        @keydown.esc.prevent="renaming = false"
-        @blur="commitRename"
+      <InlineInput
+        :initial="entry.name"
+        :icon="isDir ? FolderIcon : DocumentIcon"
+        @commit="commitRename"
+        @cancel="renaming = false"
       />
     </div>
 
     <button
       v-else
-      class="flex w-full items-center gap-1.5 overflow-hidden whitespace-nowrap py-[3px] pr-2 text-left text-[12.5px] hover:bg-hover hover:text-fg"
+      class="flex w-full items-center gap-1.5 overflow-hidden whitespace-nowrap py-0.5 pr-2 text-left text-sm hover:bg-hover hover:text-fg"
       :class="isActive ? 'bg-active text-fg' : isOpen ? 'text-fg' : 'text-muted'"
       :style="{ paddingLeft: `${8 + depth * 14}px` }"
       :title="error ?? path"
@@ -164,12 +143,12 @@ function onContextMenu(event: MouseEvent) {
         class="size-3.5 shrink-0 text-subtle"
       />
       <span class="overflow-hidden text-ellipsis">{{ entry.name }}</span>
-      <span v-if="entry.isSymlink" class="text-[10px] text-subtle">→</span>
+      <span v-if="entry.isSymlink" class="text-2xs text-subtle">→</span>
     </button>
 
     <div
       v-if="error"
-      class="whitespace-normal py-0.5 pr-2 text-[11px] text-red"
+      class="whitespace-normal py-0.5 pr-2 text-xs text-red"
       :style="{ paddingLeft: `${24 + depth * 14}px` }"
     >
       {{ error }}
@@ -179,20 +158,15 @@ function onContextMenu(event: MouseEvent) {
       <!-- inline new-file/new-folder input -->
       <div
         v-if="creating"
-        class="flex items-center gap-1.5 py-[3px] pr-2"
+        class="flex items-center gap-1.5 py-0.5 pr-2"
         :style="{ paddingLeft: `${8 + (depth + 1) * 14}px` }"
       >
         <span class="size-3 shrink-0" />
-        <component :is="creating === 'folder' ? FolderIcon : DocumentIcon" class="size-3.5 shrink-0 text-subtle" />
-        <input
-          ref="inputEl"
-          v-model="nameInput"
+        <InlineInput
+          :icon="creating === 'folder' ? FolderIcon : DocumentIcon"
           :placeholder="creating === 'folder' ? 'folder name' : 'file name'"
-          class="min-w-0 flex-1 rounded border border-accent bg-elevated px-1 text-[12.5px] text-fg outline-none"
-          spellcheck="false"
-          @keydown.enter.prevent="commitCreate"
-          @keydown.esc.prevent="creating = null"
-          @blur="commitCreate"
+          @commit="commitCreate"
+          @cancel="creating = null"
         />
       </div>
 

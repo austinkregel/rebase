@@ -1,17 +1,23 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { EditorView } from '@codemirror/view'
+import { CodeBracketIcon, EyeIcon } from '@heroicons/vue/20/solid'
 import { createEditorState, languageCompartment, languageFor, reconfigureSettings } from '@/cm/setup'
 import { useFilesStore } from '@/stores/files'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectsStore } from '@/stores/projects'
+import { viewerFor } from '@/services/viewers'
+import { mimeForPath } from '@/services/mime'
 
-// One CodeMirror instance per editor panel/tab — that's what lets Dockview
-// show different files in split groups simultaneously. dockview-vue hands each
-// panel a single `params` prop = { params: <our params>, api, ... }.
+// One panel per open file. A content-aware viewer may claim the file by MIME
+// type (image/pdf/media/zip/markdown); otherwise it falls back to CodeMirror.
+// Viewers that allow it expose a "View Source" toggle that swaps back to the
+// editor over the same text buffer. dockview-vue hands each panel a single
+// `params` prop = { params: <our params>, api, ... }.
 const props = defineProps<{ params: { params: { path: string; clientId: string } } }>()
 const path = props.params.params.path
 const clientId = props.params.params.clientId
+const mime = mimeForPath(path)
 
 const files = useFilesStore()
 const settings = useSettingsStore()
@@ -23,6 +29,12 @@ let suppressChange = false
 
 const current = computed(() => files.openFiles.find((f) => f.path === path) ?? null)
 const effectiveSettings = computed(() => settings.effective(projects.active?.editor))
+
+// The viewer (if any) is determined by the file's MIME type and is stable for
+// the panel's lifetime. `showSource` flips a toggle-capable viewer to the editor.
+const viewer = viewerFor(path)
+const showSource = ref(false)
+const showEditor = computed(() => !viewer || (showSource.value && !!viewer.allowRawToggle))
 
 function handleChange(doc: string) {
   if (!suppressChange) files.updateContent(path, doc)
@@ -50,14 +62,25 @@ function loadDoc() {
   })
 }
 
+// Mount/destroy CodeMirror as the editor branch enters/leaves the DOM (it lives
+// behind a v-if, so the host element appears only when the editor is shown).
+watch(
+  host,
+  (el) => {
+    if (el && !view) {
+      view = new EditorView({ state: createEditorState({ doc: '', onChange: handleChange, onSave: handleSave, settings: effectiveSettings.value }), parent: el })
+      loadDoc()
+    } else if (!el && view) {
+      view.destroy()
+      view = null
+    }
+  },
+  { flush: 'post' },
+)
+
 onMounted(async () => {
-  view = new EditorView({
-    state: createEditorState({ doc: '', onChange: handleChange, onSave: handleSave, settings: effectiveSettings.value }),
-    parent: host.value!,
-  })
   // First open / a tab restored from a saved layout: make sure the file is loaded.
   if (!current.value) await files.openFile(clientId, path)
-  loadDoc()
 })
 
 onBeforeUnmount(() => {
@@ -88,14 +111,34 @@ watch(
 
 <template>
   <div class="editor-pane">
-    <!-- The editor is always mounted (so a tab clearly opens); loading/errors
-         show as non-blocking banners over a visible, empty editor. -->
-    <div v-if="current?.loading" class="editor-banner">loading content…</div>
-    <div v-else-if="current?.error" class="editor-banner error">
-      <span class="msg">{{ current.error }}</span>
-      <button class="retry" @click="files.reloadFile(path)">Retry</button>
+    <!-- Source/rendered toggle for viewers that opt in (markdown, svg). -->
+    <div v-if="viewer && viewer.allowRawToggle" class="viewer-toolbar">
+      <button class="toggle" @click="showSource = !showSource">
+        <component :is="showSource ? EyeIcon : CodeBracketIcon" class="size-3.5" />
+        <span>{{ showSource ? 'View Rendered' : 'View Source' }}</span>
+      </button>
     </div>
-    <div ref="host" class="editor-host" />
+
+    <!-- Editor branch: plain text files, or a viewer's "View Source". -->
+    <template v-if="showEditor">
+      <div v-if="current?.loading" class="editor-banner">loading content…</div>
+      <div v-else-if="current?.error" class="editor-banner error">
+        <span class="msg">{{ current.error }}</span>
+        <button class="retry" @click="files.reloadFile(path)">Retry</button>
+      </div>
+      <div ref="host" class="editor-host" />
+    </template>
+
+    <!-- Viewer branch: content-aware rendering. -->
+    <component
+      :is="viewer.component"
+      v-else-if="viewer"
+      class="viewer-host"
+      :path="path"
+      :client-id="clientId"
+      :mime="mime"
+      :content="current?.content ?? ''"
+    />
   </div>
 </template>
 
@@ -108,9 +151,32 @@ watch(
   min-height: 0;
   background: var(--bg);
 }
-.editor-host {
+.editor-host,
+.viewer-host {
   flex: 1;
   min-height: 0;
+}
+.viewer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  padding: 3px 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.viewer-toolbar .toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.viewer-toolbar .toggle:hover {
+  color: var(--fg);
 }
 .editor-banner {
   display: flex;

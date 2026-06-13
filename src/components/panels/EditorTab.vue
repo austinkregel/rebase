@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { XMarkIcon } from '@heroicons/vue/20/solid'
 import { useFilesStore } from '@/stores/files'
 import { openContextMenu, type ContextMenuItem } from '@/services/contextMenu'
+import { menuItemsFor } from '@/services/menus'
 import { baseName } from '@/services/paths'
 
 // Custom dockview tab: title + dirty dot + close, with a useful right-click menu.
@@ -55,13 +56,14 @@ function onMenu(e: MouseEvent) {
     items.push({ label: 'Copy Path', action: () => copy(path.value), separator: true })
     items.push({ label: 'Copy File Name', action: () => copy(title.value) })
   }
+  items.push(...menuItemsFor('editorTab/context', { clientId: props.params.params?.clientId, path: path.value || undefined }))
   openContextMenu(e, items)
 }
 </script>
 
 <template>
   <div
-    class="group flex h-full items-center gap-1.5 px-2 text-[12px]"
+    class="group flex h-full items-center gap-1.5 px-2 text-sm"
     :title="path || title"
     @contextmenu.prevent="onMenu"
     @pointerdown.middle.prevent="close"

@@ -11,6 +11,8 @@ export interface Envelope {
 export interface PublicClient {
   clientId: string
   lastPong: number
+  /** Last measured ping→pong round-trip (ms). Absent until the first pong. */
+  pingRttMs?: number
   authenticated: boolean
   platform?: string
   release?: string

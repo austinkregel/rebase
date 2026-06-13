@@ -1,14 +1,16 @@
+import { reactive } from 'vue'
 import { runCommand, togglePalette } from './commands'
 
 /**
  * App-level keybindings (VS Code defaults), platform-aware. The editor's own
  * keybindings live in the CodeMirror keymap; this layer handles workbench
- * commands (palette, toggles, terminal, editor lifecycle) globally.
+ * commands (palette, toggles, editor lifecycle) globally. Plugins contribute
+ * their own chords via registerKeybinding (e.g. the terminal plugin's Ctrl+`).
  */
 export const isMac =
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
 
-interface Binding {
+export interface Binding {
   /** Cmd on macOS, Ctrl elsewhere. */
   mod?: boolean
   /** Literal Ctrl on every platform (VS Code uses this for the terminal). */
@@ -22,15 +24,25 @@ interface Binding {
   whenEditor?: 'skip'
 }
 
-// VS Code default chords for the commands the workbench contributes.
-const bindings: Binding[] = [
+// Core chords (workbench commands). Plugin chords live in `registered`.
+const coreBindings: Binding[] = [
   { mod: true, shift: true, key: 'p', command: '__palette' },
   { mod: true, key: 'b', command: 'view.toggleServers' },
   { mod: true, key: 'j', command: 'view.toggleTools' },
-  { ctrl: true, key: '`', command: 'terminal.new' },
   { mod: true, key: 'w', command: 'editor.closeActive', whenEditor: 'skip' },
   { mod: true, key: 's', command: 'file.saveActive', whenEditor: 'skip' },
 ]
+const registered = reactive(new Set<Binding>())
+
+/** Register a keybinding (used by plugins); returns a disposer. */
+export function registerKeybinding(b: Binding): () => void {
+  registered.add(b)
+  return () => registered.delete(b)
+}
+
+function allBindings(): Binding[] {
+  return [...coreBindings, ...registered]
+}
 
 function matches(b: Binding, e: KeyboardEvent): boolean {
   const expectedMeta = !!b.mod && isMac
@@ -45,7 +57,7 @@ function matches(b: Binding, e: KeyboardEvent): boolean {
 }
 
 export function handleKeydown(e: KeyboardEvent): void {
-  const b = bindings.find((binding) => matches(binding, e))
+  const b = allBindings().find((binding) => matches(binding, e))
   if (!b) return
   const target = e.target as HTMLElement | null
   const inEditor = !!target?.closest?.('.cm-editor')
@@ -57,7 +69,7 @@ export function handleKeydown(e: KeyboardEvent): void {
 
 /** Human-readable hint for a command's binding (⌘⇧P on mac, Ctrl+Shift+P else). */
 export function keybindingHint(commandId: string): string {
-  const b = bindings.find((x) => x.command === commandId || (commandId === '__palette' && x.command === '__palette'))
+  const b = allBindings().find((x) => x.command === commandId)
   if (!b) return ''
   if (isMac) {
     let s = ''

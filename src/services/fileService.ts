@@ -25,6 +25,21 @@ export class FileOpError extends Error {
 const CHUNK_BYTES = 256 * 1024
 const LIST_TIMEOUT_MS = 20_000
 const READ_TIMEOUT_MS = 30_000
+/** Ceiling for binary viewer reads — the whole file buffers in memory to build
+ *  a Blob URL, so cap it. Text reads are unbounded (source files are small). */
+const MAX_BINARY_BYTES = 50 * 1024 * 1024
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(1)} ${units[i]}`
+}
 
 /**
  * The async filesystem interface the rest of the app uses. Every wire-format
@@ -69,11 +84,26 @@ export class FileService {
   }
 
   /**
-   * Read file content. Implements the proposed `file_get` extension
+   * Read file content as text. Implements the proposed `file_get` extension
    * (docs/PROTOCOL.md "PROTOCOL GAP") — fails with a clear error until the
    * server and agent support it.
    */
   async read(clientId: string, path: string): Promise<string> {
+    return decodeText(await this.fetchBytes(clientId, path))
+  }
+
+  /**
+   * Read raw file bytes (no UTF-8 decode) — the path the content-aware viewers
+   * (images, PDF, audio/video, zip) use. The wire format already carries bytes;
+   * only `read()` text-decodes them. `maxBytes` guards against buffering an
+   * unbounded blob in memory (the whole file is held to build a Blob URL).
+   */
+  async readBytes(clientId: string, path: string, maxBytes = MAX_BINARY_BYTES): Promise<Uint8Array> {
+    return this.fetchBytes(clientId, path, maxBytes)
+  }
+
+  /** Stream the chunked `file_get` download and reassemble the raw bytes. */
+  private async fetchBytes(clientId: string, path: string, maxBytes?: number): Promise<Uint8Array> {
     const requestId = newRequestId()
     const chunks: FileGetChunk[] = []
 
@@ -92,10 +122,17 @@ export class FileService {
       const result = await this.rpc.call<FileGetResult>(
         'file_get_request',
         'file_get_result',
-        { clientId, requestId, path },
+        { clientId, requestId, path, ...(maxBytes != null ? { maxSize: maxBytes } : {}) },
         { timeoutMs: READ_TIMEOUT_MS },
       )
       if (!result.ok) throw new FileOpError('read', path, result.error ?? 'unknown error')
+      if (maxBytes != null && result.size != null && result.size > maxBytes) {
+        throw new FileOpError(
+          'read',
+          path,
+          `file is ${formatBytes(result.size)} — too large to open here (limit ${formatBytes(maxBytes)})`,
+        )
+      }
     } catch (err) {
       if (err instanceof RpcTimeoutError) {
         throw new FileOpError(
@@ -121,7 +158,7 @@ export class FileService {
       bytes.set(part, offset)
       offset += part.length
     }
-    return decodeText(bytes)
+    return bytes
   }
 
   /**

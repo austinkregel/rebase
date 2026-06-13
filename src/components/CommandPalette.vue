@@ -59,7 +59,7 @@ watch(
         <Combobox :model-value="null" @update:model-value="onSelect">
           <ComboboxInput
             ref="inputEl"
-            class="w-full border-b border-line bg-transparent px-3 py-2.5 text-[13px] text-fg outline-none placeholder:text-subtle"
+            class="w-full border-b border-line bg-transparent px-3 py-2.5 text-base text-fg outline-none placeholder:text-subtle"
             placeholder="Type a command…"
             :display-value="() => ''"
             autocomplete="off"
@@ -67,7 +67,7 @@ watch(
             @input="query = ($event.target as HTMLInputElement).value"
           />
           <ComboboxOptions static class="max-h-80 overflow-auto py-1">
-            <p v-if="!filtered.length" class="px-3 py-2 text-[12px] text-subtle">No matching commands</p>
+            <p v-if="!filtered.length" class="px-3 py-2 text-sm text-subtle">No matching commands</p>
             <ComboboxOption
               v-for="cmd in filtered"
               :key="cmd.id"
@@ -76,12 +76,12 @@ watch(
               as="template"
             >
               <li
-                class="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[12.5px]"
+                class="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm"
                 :class="active ? 'bg-accent/15 text-fg' : 'text-muted'"
               >
-                <span v-if="cmd.category" class="shrink-0 text-[11px] text-subtle">{{ cmd.category }}:</span>
+                <span v-if="cmd.category" class="shrink-0 text-xs text-subtle">{{ cmd.category }}:</span>
                 <span class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{{ cmd.title }}</span>
-                <kbd v-if="keybindingHint(cmd.id)" class="shrink-0 rounded border border-line px-1 text-[10px] text-subtle">
+                <kbd v-if="keybindingHint(cmd.id)" class="shrink-0 rounded border border-line px-1 text-2xs text-subtle">
                   {{ keybindingHint(cmd.id) }}
                 </kbd>
               </li>

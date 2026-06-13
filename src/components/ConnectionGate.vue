@@ -3,6 +3,7 @@ import { useSessionStore } from '@/stores/session'
 import Workbench from './Workbench.vue'
 import Onboarding from './Onboarding.vue'
 import ConnectPanel from './ConnectPanel.vue'
+import Button from './ui/Button.vue'
 
 const session = useSessionStore()
 </script>
@@ -13,14 +14,15 @@ const session = useSessionStore()
     <Onboarding v-if="session.phase === 'unauthenticated'" />
     <ConnectPanel v-else-if="session.phase === 'disconnected'" />
     <div v-else class="w-full max-w-md rounded-xl border border-line bg-surface p-7 text-center">
-      <p class="text-[13px] text-muted">{{ session.phase === 'connecting' ? 'connecting…' : 'loading…' }}</p>
-      <button
+      <p class="text-base text-muted">{{ session.phase === 'connecting' ? 'connecting…' : 'loading…' }}</p>
+      <Button
         v-if="session.phase === 'connecting'"
-        class="mt-2 text-[12px] text-subtle hover:text-accent"
+        variant="ghost"
+        class="mt-2"
         @click="session.disconnect()"
       >
         cancel
-      </button>
+      </Button>
     </div>
   </div>
 </template>

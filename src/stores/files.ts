@@ -3,6 +3,7 @@ import { fileService } from '@/services/fileService'
 import { useGitStore } from '@/stores/git'
 import { useProjectsStore } from '@/stores/projects'
 import { normalizeRoot } from '@/services/paths'
+import { viewerFor } from '@/services/viewers'
 import type { DirListEntry } from '@/transport/types'
 
 export interface OpenFile {
@@ -14,6 +15,10 @@ export interface OpenFile {
   savedContent: string
   loading: boolean
   error: string | null
+  /** Id of the content-aware viewer rendering this file (undefined → editor). */
+  viewerId?: string
+  /** Binary-backed viewers load their own bytes and can't be edited/saved. */
+  readOnly?: boolean
 }
 
 export const useFilesStore = defineStore('files', {
@@ -88,16 +93,24 @@ export const useFilesStore = defineStore('files', {
         this.activePath = path
         return
       }
+      // A content-aware viewer may claim this file by MIME type. Binary-backed
+      // viewers (image/pdf/media/zip) load their own bytes — skip the text read
+      // and mark the buffer read-only. Text-backed viewers (markdown) still read
+      // the text so the viewer can render it and the source toggle can edit it.
+      const viewer = viewerFor(path)
       const file: OpenFile = {
         path,
         clientId,
         content: '',
         savedContent: '',
-        loading: true,
+        loading: !viewer?.binary,
         error: null,
+        viewerId: viewer?.id,
+        readOnly: viewer?.binary || undefined,
       }
       this.openFiles.push(file)
       this.activePath = path
+      if (viewer?.binary) return
       try {
         const content = await fileService.read(clientId, path)
         file.content = content
@@ -117,7 +130,7 @@ export const useFilesStore = defineStore('files', {
     /** Re-read an already-open file's content (used by the editor's Retry). */
     async reloadFile(path: string) {
       const file = this.openFiles.find((f) => f.path === path)
-      if (!file) return
+      if (!file || file.readOnly) return
       file.loading = true
       file.error = null
       try {
@@ -134,8 +147,9 @@ export const useFilesStore = defineStore('files', {
     async saveFile(path: string) {
       const file = this.openFiles.find((f) => f.path === path)
       // Never save while loading or when the content failed to load — that would
-      // clobber the file with an empty/partial buffer.
-      if (!file || file.loading || file.error) return
+      // clobber the file with an empty/partial buffer. Binary viewer buffers are
+      // read-only and have no text content to write.
+      if (!file || file.loading || file.error || file.readOnly) return
       const snapshot = file.content
       await fileService.write(file.clientId, file.path, snapshot)
       file.savedContent = snapshot

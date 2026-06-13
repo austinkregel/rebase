@@ -13,6 +13,8 @@ export interface Command {
   category?: string
   /** Display-only keybinding hint (e.g. "⌘⇧P"); the actual binding lives in keybindings.ts. */
   keybinding?: string
+  /** Owning plugin id, when contributed by one. */
+  pluginId?: string
   run: () => void | Promise<void>
   /** When present and false, the command is hidden/disabled. */
   isEnabled?: () => boolean

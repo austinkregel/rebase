@@ -11,6 +11,9 @@ import { useProjectsStore } from '@/stores/projects'
 import { useFilesStore } from '@/stores/files'
 import { registerCommands } from '@/services/commands'
 import { handleKeydown } from '@/services/keybindings'
+import { activatePlugins, deactivatePlugins } from '@/services/plugins'
+import { dock } from '@/services/dock'
+import { bundledPlugins } from '@/plugins'
 
 const session = useSessionStore()
 const agents = useAgentsStore()
@@ -59,10 +62,15 @@ onMounted(() => {
   ])
 
   window.addEventListener('keydown', handleKeydown)
+
+  // Activate bundled plugins. The terminal capability is resolved lazily through
+  // the dock service (the Workbench wires dock.openTerminal once it mounts).
+  void activatePlugins(bundledPlugins, { openTerminal: () => dock.openTerminal?.() })
 })
 
 onBeforeUnmount(() => {
   disposeCommands?.()
+  deactivatePlugins()
   window.removeEventListener('keydown', handleKeydown)
 })
 </script>

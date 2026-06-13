@@ -1,6 +1,11 @@
 import { defineStore } from 'pinia'
 import { defaultEditorSettings, type EditorSettings } from '@/cm/setup'
 import { loadValue, saveValue } from '@/services/store'
+import {
+  applyAppearance,
+  defaultAppearance,
+  type AppearanceSettings,
+} from '@/services/appearance'
 
 export interface IndexingSettings {
   ollamaUrl: string
@@ -19,6 +24,7 @@ export const useSettingsStore = defineStore('settings', {
   state: () => ({
     editor: { ...defaultEditorSettings } as EditorSettings,
     indexing: { ...defaultIndexing } as IndexingSettings,
+    appearance: { ...defaultAppearance } as AppearanceSettings,
     loaded: false,
   }),
 
@@ -26,9 +32,18 @@ export const useSettingsStore = defineStore('settings', {
     async load() {
       const editor = await loadValue<Partial<EditorSettings>>('editorSettings', {})
       const indexing = await loadValue<Partial<IndexingSettings>>('indexingSettings', {})
+      const appearance = await loadValue<Partial<AppearanceSettings>>('appearanceSettings', {})
       this.editor = { ...defaultEditorSettings, ...editor }
       this.indexing = { ...defaultIndexing, ...indexing }
+      this.appearance = { ...defaultAppearance, ...appearance }
+      applyAppearance(this.appearance)
       this.loaded = true
+    },
+
+    async updateAppearance(patch: Partial<AppearanceSettings>) {
+      this.appearance = { ...this.appearance, ...patch }
+      applyAppearance(this.appearance)
+      await saveValue('appearanceSettings', this.appearance)
     },
 
     async update(patch: Partial<EditorSettings>) {

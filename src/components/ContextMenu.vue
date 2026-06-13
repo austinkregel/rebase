@@ -55,7 +55,7 @@ watch(
     <div v-if="contextMenu.open" class="fixed inset-0 z-[1000]" @click="closeContextMenu" @contextmenu.prevent="closeContextMenu">
       <div
         ref="panel"
-        class="fixed min-w-[176px] rounded-md border border-line bg-elevated py-1 text-[12.5px] shadow-xl"
+        class="fixed min-w-[176px] rounded-md border border-line bg-elevated py-1 text-sm shadow-xl"
         :style="{ left: `${pos.x}px`, top: `${pos.y}px` }"
         @click.stop
       >

@@ -10,6 +10,7 @@ import EditorPanel from './panels/EditorPanel.vue'
 import TerminalPanel from './panels/TerminalPanel.vue'
 import EditorTab from './panels/EditorTab.vue'
 import StatusTray from './StatusTray.vue'
+import IconButton from './ui/IconButton.vue'
 import { useFilesStore, type OpenFile } from '@/stores/files'
 import { useSessionStore } from '@/stores/session'
 import { dock } from '@/services/dock'
@@ -195,9 +196,8 @@ function closeAllEditors() {
 let disposeWorkbenchCommands: (() => void) | undefined
 onMounted(() => {
   disposeWorkbenchCommands = registerCommands([
-    { id: 'view.toggleServers', title: 'Toggle Servers Sidebar', category: 'View', run: () => (serversOpen.value = !serversOpen.value) },
-    { id: 'view.toggleTools', title: 'Toggle Tools Sidebar', category: 'View', run: () => (toolsOpen.value = !toolsOpen.value) },
-    { id: 'terminal.new', title: 'New Terminal', category: 'Terminal', run: () => openTerminal() },
+    { id: 'view.toggleServers', title: 'Toggle Servers Sidebar', category: 'View', run: () => { serversOpen.value = !serversOpen.value } },
+    { id: 'view.toggleTools', title: 'Toggle Tools Sidebar', category: 'View', run: () => { toolsOpen.value = !toolsOpen.value } },
     { id: 'editor.closeActive', title: 'Close Editor', category: 'Editor', isEnabled: () => !!files.activePath, run: closeActiveEditor },
     { id: 'editor.closeAll', title: 'Close All Editors', category: 'Editor', isEnabled: () => editorIds.size > 0, run: closeAllEditors },
   ])
@@ -211,11 +211,9 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
       <!-- Servers (collapsible) -->
       <template v-if="serversOpen">
         <aside class="flex min-h-0 shrink-0 flex-col bg-surface" :style="{ width: `${widths.servers}px` }">
-          <div class="flex items-center justify-between border-b border-line py-1 pl-3 pr-2 text-[10.5px] uppercase tracking-[0.1em] text-subtle">
+          <div class="flex items-center justify-between border-b border-line py-1 pl-3 pr-2 text-xs uppercase tracking-[0.1em] text-subtle">
             <span>servers</span>
-            <button class="text-subtle hover:text-fg" title="collapse" @click="serversOpen = false">
-              <ChevronDoubleLeftIcon class="size-3.5" />
-            </button>
+            <IconButton :icon="ChevronDoubleLeftIcon" variant="plain" label="collapse" @click="serversOpen = false" />
           </div>
           <ServersColumn />
         </aside>
@@ -223,7 +221,7 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
       </template>
       <button
         v-else
-        class="flex shrink-0 cursor-pointer items-center justify-center border-r border-line bg-surface py-2.5 text-[11px] uppercase tracking-[0.08em] text-subtle [writing-mode:vertical-rl] hover:text-fg"
+        class="flex shrink-0 cursor-pointer items-center justify-center border-r border-line bg-surface py-2.5 text-xs uppercase tracking-[0.08em] text-subtle [writing-mode:vertical-rl] hover:text-fg"
         title="show servers"
         @click="serversOpen = true"
       >
@@ -250,7 +248,7 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
           class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1 text-subtle"
         >
           <p class="text-lg tracking-[0.08em]">rebase</p>
-          <p class="text-[12px]">select a file to start editing</p>
+          <p class="text-sm">select a file to start editing</p>
         </div>
       </main>
 
@@ -258,10 +256,8 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
       <template v-if="toolsOpen">
         <div class="w-[3px] shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent" @mousedown.prevent="startDrag('tools', $event)" />
         <aside class="flex min-h-0 shrink-0 flex-col bg-surface" :style="{ width: `${widths.tools}px` }">
-          <div class="flex items-center gap-2 border-b border-line py-1 pl-2 pr-3 text-[10.5px] uppercase tracking-[0.1em] text-subtle">
-            <button class="text-subtle hover:text-fg" title="collapse" @click="toolsOpen = false">
-              <ChevronDoubleRightIcon class="size-3.5" />
-            </button>
+          <div class="flex items-center gap-2 border-b border-line py-1 pl-2 pr-3 text-xs uppercase tracking-[0.1em] text-subtle">
+            <IconButton :icon="ChevronDoubleRightIcon" variant="plain" label="collapse" @click="toolsOpen = false" />
             <span>tools</span>
           </div>
           <ToolsColumn />
@@ -269,7 +265,7 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
       </template>
       <button
         v-else
-        class="flex shrink-0 cursor-pointer items-center justify-center border-l border-line bg-surface py-2.5 text-[11px] uppercase tracking-[0.08em] text-subtle [writing-mode:vertical-rl] hover:text-fg"
+        class="flex shrink-0 cursor-pointer items-center justify-center border-l border-line bg-surface py-2.5 text-xs uppercase tracking-[0.08em] text-subtle [writing-mode:vertical-rl] hover:text-fg"
         title="show tools"
         @click="toolsOpen = true"
       >

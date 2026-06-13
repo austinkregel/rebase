@@ -5,13 +5,18 @@ import type { Extension } from '@codemirror/state'
 
 // Calm, monospace-forward dark identity. The editor is the signature;
 // everything around it stays quiet.
+//
+// Structural colors (chrome, cursor, gutter) reference the runtime theme tokens
+// via var(), so the editor follows the app theme/accent live. The syntax palette
+// below stays fixed — that's the editor's deliberate identity, independent of the
+// chrome theme.
 const colors = {
-  bg: '#0d1117',
-  fg: '#d4dae2',
-  gutter: '#566069',
+  bg: 'var(--color-bg)',
+  fg: 'var(--color-fg)',
+  gutter: 'var(--color-subtle)',
   selection: '#1f3a5f',
-  activeLine: '#141b24',
-  cursor: '#7aa2f7',
+  activeLine: 'var(--color-active)',
+  cursor: 'var(--color-accent)',
   comment: '#5e6a76',
   keyword: '#bb9af7',
   string: '#9ece6a',
@@ -51,8 +56,8 @@ const editorTheme = EditorView.theme(
     '.cm-matchingBracket': { backgroundColor: '#2a3950', outline: 'none' },
     '.cm-searchMatch': { backgroundColor: '#3b4261' },
     '.cm-tooltip': {
-      backgroundColor: '#161d27',
-      border: '1px solid #232b36',
+      backgroundColor: 'var(--color-elevated)',
+      border: '1px solid var(--color-line)',
       color: colors.fg,
     },
   },

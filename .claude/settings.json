@@ -55,7 +55,8 @@
       "/Users/austinkregel/src/rebase-indexer",
       "/Users/austinkregel/src/compute-agent/internal/app",
       "/Users/austinkregel/src/compute-agent-server/internal/api",
-      "/Users/austinkregel/src/compute-agent-server/internal/relay"
+      "/Users/austinkregel/src/compute-agent-server/internal/relay",
+      "/Users/austinkregel/src/compute-agent-server/internal/state"
     ]
   }
 }

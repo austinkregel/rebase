@@ -7,6 +7,8 @@ import { useSettingsStore } from '@/stores/settings'
 import { useSessionStore } from '@/stores/session'
 import { useProjectsStore } from '@/stores/projects'
 import { useFilesStore } from '@/stores/files'
+import SectionHeader from './ui/SectionHeader.vue'
+import Button from './ui/Button.vue'
 
 interface Hit {
   relative: string
@@ -63,13 +65,13 @@ function open(h: Hit) {
 
 <template>
   <div class="flex h-full min-h-0 flex-col bg-surface">
-    <p class="border-b border-line px-3 py-2 text-[10.5px] uppercase tracking-[0.1em] text-subtle">search</p>
+    <SectionHeader>search</SectionHeader>
 
     <template v-if="supported">
       <div class="flex flex-col gap-2 border-b border-line p-3">
         <input
           v-model="settings.indexing.indexPath"
-          class="w-full rounded border border-line bg-elevated px-2 py-1 text-[11px] text-fg outline-none focus:border-accent"
+          class="w-full rounded border border-line bg-elevated px-2 py-1 text-sm text-fg outline-none focus:border-accent"
           placeholder="/path/to/project/.rebase-index"
           spellcheck="false"
           autocomplete="off"
@@ -78,19 +80,19 @@ function open(h: Hit) {
         <form class="flex gap-1" @submit.prevent="run">
           <input
             v-model="query"
-            class="min-w-0 flex-1 rounded border border-line bg-elevated px-2 py-1 text-[12px] text-fg outline-none focus:border-accent"
+            class="min-w-0 flex-1 rounded border border-line bg-elevated px-2 py-1 text-sm text-fg outline-none focus:border-accent"
             placeholder="semantic search…"
           />
-          <button class="flex items-center rounded bg-accent px-2 text-bg disabled:opacity-50" :disabled="busy" type="submit">
+          <Button variant="primary" type="submit" :disabled="busy">
             <MagnifyingGlassIcon class="size-4" />
-          </button>
+          </Button>
         </form>
       </div>
 
       <div class="flex-1 overflow-auto py-1">
-        <p v-if="busy" class="mx-3 my-2 text-[12px] text-subtle">searching…</p>
-        <p v-else-if="error" class="mx-3 my-2 text-[12px] text-red">{{ error }}</p>
-        <p v-else-if="!results.length" class="mx-3 my-2 text-[12px] text-subtle">No results yet.</p>
+        <p v-if="busy" class="mx-3 my-2 text-sm text-subtle">searching…</p>
+        <p v-else-if="error" class="mx-3 my-2 text-sm text-red">{{ error }}</p>
+        <p v-else-if="!results.length" class="mx-3 my-2 text-sm text-subtle">No results yet.</p>
         <button
           v-for="(h, i) in results"
           :key="i"
@@ -98,18 +100,18 @@ function open(h: Hit) {
           :title="h.relative"
           @click="open(h)"
         >
-          <span class="flex items-center gap-1.5 text-[12px] text-fg">
+          <span class="flex items-center gap-1.5 text-sm text-fg">
             <DocumentTextIcon class="size-3 shrink-0 text-subtle" />
             <span class="overflow-hidden text-ellipsis whitespace-nowrap">{{ basename(h.relative) }}</span>
-            <span class="ml-auto shrink-0 text-[10px] text-subtle">d={{ h.distance.toFixed(2) }}</span>
+            <span class="ml-auto shrink-0 text-2xs text-subtle">d={{ h.distance.toFixed(2) }}</span>
           </span>
-          <span class="block overflow-hidden text-ellipsis whitespace-nowrap text-[10.5px] text-subtle">
+          <span class="block overflow-hidden text-ellipsis whitespace-nowrap text-xs text-subtle">
             {{ h.relative }}:{{ h.line_start }}
           </span>
         </button>
       </div>
     </template>
 
-    <p v-else class="m-3 text-[11.5px] text-subtle">Code search runs in the desktop app.</p>
+    <p v-else class="m-3 text-sm text-subtle">Code search runs in the desktop app.</p>
   </div>
 </template>
