@@ -206,7 +206,9 @@ export async function rebuild(project: Project): Promise<void> {
     await runIndexer(clientId, [bin, 'pack', '--index', indexDir, '--out', archivePath], root)
 
     setIndexPhase(pid, 'downloading')
-    const bytes = await fileService.readBytes(clientId, archivePath)
+    // The packed index can be sizable and streams over the WS in chunks, so
+    // allow a high cap + long timeout rather than the default 50MB/30s.
+    const bytes = await fileService.readBytes(clientId, archivePath, 512 * 1024 * 1024, FETCH_TIMEOUT_MS)
     await invoke('crucible_extract_index', { archive: bytesToBase64(bytes), clientId, root })
     await fileService.delete(clientId, archivePath).catch(() => {})
 

@@ -109,12 +109,22 @@ export class FileService {
    * only `read()` text-decodes them. `maxBytes` guards against buffering an
    * unbounded blob in memory (the whole file is held to build a Blob URL).
    */
-  async readBytes(clientId: string, path: string, maxBytes = MAX_BINARY_BYTES): Promise<Uint8Array> {
-    return this.fetchBytes(clientId, path, maxBytes)
+  async readBytes(
+    clientId: string,
+    path: string,
+    maxBytes = MAX_BINARY_BYTES,
+    timeoutMs = READ_TIMEOUT_MS,
+  ): Promise<Uint8Array> {
+    return this.fetchBytes(clientId, path, maxBytes, timeoutMs)
   }
 
   /** Stream the chunked `file_get` download and reassemble the raw bytes. */
-  private async fetchBytes(clientId: string, path: string, maxBytes?: number): Promise<Uint8Array> {
+  private async fetchBytes(
+    clientId: string,
+    path: string,
+    maxBytes?: number,
+    timeoutMs = READ_TIMEOUT_MS,
+  ): Promise<Uint8Array> {
     const requestId = newRequestId()
     const chunks: FileGetChunk[] = []
 
@@ -134,7 +144,7 @@ export class FileService {
         'file_get_request',
         'file_get_result',
         { clientId, requestId, path, ...(maxBytes != null ? { maxSize: maxBytes } : {}) },
-        { timeoutMs: READ_TIMEOUT_MS },
+        { timeoutMs },
       )
       if (!result.ok) throw new FileOpError('read', path, result.error ?? 'unknown error')
       if (maxBytes != null && result.size != null && result.size > maxBytes) {
