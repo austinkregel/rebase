@@ -21,13 +21,17 @@ import { appendSystemNote, setIndexState, setIndexPhase } from '@/services/cruci
 /** Indexer release (github.com/austinkregel/rebase-indexer) the agent pulls. */
 const INDEXER_REPO = 'austinkregel/rebase-indexer'
 const INDEXER_VERSION = 'v0.0.3'
-/** Stable absolute location on the (unix) agent for the cached binary. The name
- *  is version-less so the allowlist entry never changes; a `.version` marker
- *  tracks which release is installed so upgrades re-download. */
-const AGENT_BIN_DIR = '/tmp/rebase/bin'
-const AGENT_BIN_NAME = 'rebase-indexer'
-const AGENT_BIN_PATH = `${AGENT_BIN_DIR}/${AGENT_BIN_NAME}`
-const AGENT_VERSION_MARKER = `${AGENT_BIN_DIR}/.version`
+/**
+ * Pinned SHA-256 of each release asset for INDEXER_VERSION. The agent downloads
+ * the binary directly from GitHub, so we verify it against these hashes (shipped
+ * inside the signed app) before running it — a compromised release/CDN can't
+ * yield code execution on the agent. MUST be updated alongside INDEXER_VERSION.
+ */
+const INDEXER_SHA256: Record<string, string> = {
+  'rebase-indexer-linux-x86_64': '1356f1fd74dd5dc6edbd79fcdbb584795162fd3ffc08931484f3619953c1d891',
+  'rebase-indexer-linux-arm64': 'c1d5df1007b929e3ca37dc47d4937a61d0a94bb6639f79fac69eecded992c985',
+  'rebase-indexer-macos-arm64': '0c72b308187eff77e3c4e4a9dc8801bccdb66bb113b021e2645acb1069b44bcb',
+}
 /** Indexing/packing can take minutes; give exec plenty of head-room. */
 const BUILD_TIMEOUT_SEC = 30 * 60
 const BUILD_TIMEOUT_MS = BUILD_TIMEOUT_SEC * 1000 + 5_000
@@ -37,6 +41,18 @@ const FETCH_TIMEOUT_MS = FETCH_TIMEOUT_SEC * 1000 + 5_000
 
 function releaseUrl(asset: string): string {
   return `https://github.com/${INDEXER_REPO}/releases/download/${INDEXER_VERSION}/${asset}`
+}
+
+/**
+ * Where the indexer is cached on the agent. Prefer the agent user's home (from
+ * telemetry) so it's persistent (reused across projects/reboots, not re-fetched)
+ * and not under world-writable /tmp; the `.rebase` dir is chmod 700 so another
+ * local user can't plant a malicious binary. Falls back to /tmp only when the
+ * agent hasn't reported a home yet.
+ */
+function agentDirs(home?: string): { root: string; bin: string; binPath: string; marker: string } {
+  const base = home && home.trim() ? `${home.replace(/\/+$/, '')}/.rebase` : '/tmp/rebase'
+  return { root: base, bin: `${base}/bin`, binPath: `${base}/bin/rebase-indexer`, marker: `${base}/bin/.version` }
 }
 
 /** One search hit returned by the `search_code` Tauri command. */
@@ -71,41 +87,38 @@ export function localIndexDir(clientId: string, root: string): Promise<string> {
 /**
  * Make sure the indexer binary exists on the agent. The agent downloads the
  * matching release asset *directly from GitHub* (curl, wget fallback) — pushing
- * a ~180MB binary over the control-plane socket is a non-starter. The exact
- * download command + the binary path are allowlisted first (tightly scoped).
+ * a ~180MB binary over the control-plane socket is a non-starter. We then verify
+ * its SHA-256 against the pinned hash before running it, and cache it in the
+ * agent's home (`~/.rebase/bin`, chmod 700) so it persists and can't be planted.
  */
 async function ensureBinary(clientId: string, projectId: string): Promise<string> {
   const agent = useAgentsStore().byId(clientId)
   const asset = indexerAsset(agent?.platform, agent?.arch)
+  const { root, bin, binPath, marker } = agentDirs(agent?.home)
 
-  // If the binary is already there, reuse it — only re-download when a version
-  // marker explicitly says a *different* release is installed. (Presence is the
-  // primary signal; a missing/unreadable marker must NOT force a re-download.)
-  let present = false
+  // Skip the (re)download when this version is already installed+verified. Probe
+  // the version marker with file_get (read) — NOT dir_list, which the agent
+  // restricts to its browse roots. The marker is written only AFTER checksum
+  // verification, so a matching marker means the cached binary is trusted.
   try {
-    const entries = await fileService.list(clientId, AGENT_BIN_DIR)
-    present = entries.some((e) => e.name === AGENT_BIN_NAME)
+    const installed = (await fileService.read(clientId, marker)).trim()
+    if (installed === INDEXER_VERSION) return binPath
   } catch {
-    /* dir doesn't exist yet */
-  }
-  if (present) {
-    let installed: string | null = null
-    try {
-      installed = (await fileService.read(clientId, AGENT_VERSION_MARKER)).trim()
-    } catch {
-      installed = null // no marker — assume current and keep the existing binary
-    }
-    if (installed === null || installed === INDEXER_VERSION) return AGENT_BIN_PATH
+    /* no marker (or unreadable) → (re)install */
   }
 
   const url = releaseUrl(asset)
-  const curlCmd = `curl -fSL ${url} -o ${AGENT_BIN_PATH}`
-  const wgetCmd = `wget -O ${AGENT_BIN_PATH} ${url}`
+  const curlCmd = `curl -fSL ${url} -o ${binPath}`
+  const wgetCmd = `wget -O ${binPath} ${url}`
+  const sha256Cmd = `sha256sum ${binPath}`
+  const shasumCmd = `shasum -a 256 ${binPath}`
 
   // Authorize exactly the commands we run (allowlist is prefix-matched), then
-  // let the agent fetch the binary itself.
-  await grantExec(projectId, [curlCmd, wgetCmd, AGENT_BIN_PATH])
-  await fileService.mkdir(clientId, AGENT_BIN_DIR)
+  // let the agent fetch + verify the binary itself.
+  await grantExec(projectId, [curlCmd, wgetCmd, sha256Cmd, shasumCmd, binPath])
+  await fileService.mkdir(clientId, bin)
+  // Lock down the cache root so other local users can't tamper with the binary.
+  await fileService.chmod(clientId, root, '700').catch(() => {})
 
   const opts = { timeoutSec: FETCH_TIMEOUT_SEC, timeoutMs: FETCH_TIMEOUT_MS }
   const curl = await fileService.exec(clientId, curlCmd, undefined, opts)
@@ -118,10 +131,46 @@ async function ensureBinary(clientId: string, projectId: string): Promise<string
       throw new Error(`agent could not download the indexer (${detail})`)
     }
   }
-  await fileService.chmod(clientId, AGENT_BIN_PATH, '755')
-  // Record the installed version so the next build can skip the download.
-  await fileService.write(clientId, AGENT_VERSION_MARKER, INDEXER_VERSION).catch(() => {})
-  return AGENT_BIN_PATH
+
+  await verifyChecksum(clientId, binPath, asset, [sha256Cmd, shasumCmd])
+
+  await fileService.chmod(clientId, binPath, '755')
+  // Record the installed version (only reached after a verified install).
+  await fileService.write(clientId, marker, INDEXER_VERSION).catch(() => {})
+  return binPath
+}
+
+/**
+ * Verify the downloaded binary against the pinned SHA-256, deleting it and
+ * throwing on mismatch — we refuse to execute a binary that doesn't match the
+ * release we shipped hashes for (supply-chain / MITM defense). Uses `sha256sum`
+ * (linux) or `shasum -a 256` (darwin) on the agent.
+ */
+async function verifyChecksum(
+  clientId: string,
+  binPath: string,
+  asset: string,
+  cmds: string[],
+): Promise<void> {
+  const expected = INDEXER_SHA256[asset]
+  if (!expected) {
+    throw new Error(`Crucible has no pinned checksum for ${asset} @ ${INDEXER_VERSION}`)
+  }
+  let got = ''
+  for (const cmd of cmds) {
+    const res = await fileService.exec(clientId, cmd, undefined, { timeoutSec: 120, timeoutMs: 125_000 })
+    if (res.ok && res.code === 0) {
+      got = (res.stdout.trim().split(/\s+/)[0] ?? '').toLowerCase()
+      break
+    }
+  }
+  if (got !== expected) {
+    await fileService.delete(clientId, binPath).catch(() => {})
+    throw new Error(
+      `Indexer checksum mismatch for ${asset} (expected ${expected.slice(0, 12)}…, got ` +
+        `${got ? got.slice(0, 12) + '…' : 'no sha256 tool on agent'}). Refusing to run an unverified binary.`,
+    )
+  }
 }
 
 /**

@@ -2,7 +2,7 @@
 //! the local index cache (extracting the archive the agent produced), serves the
 //! bundled indexer binary for upload, and edits the control-plane exec allowlist.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -12,6 +12,11 @@ use tauri::{ipc::Channel, State};
 
 use crate::config::AppConfig;
 use crate::oidc::Auth;
+
+/// Caps for extracting the (agent-produced, untrusted) index archive — guards
+/// against decompression bombs.
+const MAX_INDEX_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB decompressed
+const MAX_INDEX_ENTRIES: usize = 200_000;
 
 // --- Local index cache -----------------------------------------------------
 
@@ -63,10 +68,65 @@ pub fn crucible_extract_index(
         let _ = std::fs::remove_dir_all(&dir);
     }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    extract_targz(&bytes, &dir)
+}
 
-    let gz = flate2::read::GzDecoder::new(&bytes[..]);
+/// Lexically resolve `..`/`.` in `target` (without touching the filesystem) and
+/// confirm it stays under `dest`. Returns the normalized path when safe.
+fn within(dest: &Path, target: &Path) -> Option<PathBuf> {
+    let mut out = dest.to_path_buf();
+    for comp in target.strip_prefix(dest).ok()?.components() {
+        match comp {
+            Component::ParentDir => {
+                if !out.pop() || !out.starts_with(dest) {
+                    return None;
+                }
+            }
+            Component::CurDir => {}
+            Component::Normal(c) => out.push(c),
+            // Absolute / prefix components can't appear in a relative entry path.
+            _ => return None,
+        }
+    }
+    out.starts_with(dest).then_some(out)
+}
+
+/// Extract a gzip-tar into `dest` defensively: reject path-traversal and link
+/// entries (zip-slip), don't honor archived permissions (no setuid), and cap
+/// entry count + total size (decompression bomb). The archive is produced by the
+/// agent, so it's treated as untrusted input.
+fn extract_targz(bytes: &[u8], dest: &Path) -> Result<(), String> {
+    let dest = std::fs::canonicalize(dest).map_err(|e| e.to_string())?;
+    let gz = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(gz);
-    archive.unpack(&dir).map_err(|e| format!("extracting index: {e}"))?;
+    archive.set_preserve_permissions(false);
+    archive.set_overwrite(true);
+
+    let mut total: u64 = 0;
+    let mut count: usize = 0;
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        count += 1;
+        if count > MAX_INDEX_ENTRIES {
+            return Err("index archive has too many entries".into());
+        }
+        let etype = entry.header().entry_type();
+        if etype.is_symlink() || etype.is_hard_link() {
+            return Err("refusing link entry in index archive".into());
+        }
+        total = total.saturating_add(entry.header().size().unwrap_or(0));
+        if total > MAX_INDEX_BYTES {
+            return Err("index archive too large (possible decompression bomb)".into());
+        }
+        let rel = entry.path().map_err(|e| e.to_string())?.into_owned();
+        let target = dest.join(&rel);
+        let safe = within(&dest, &target)
+            .ok_or_else(|| format!("refusing path-traversal entry: {}", rel.display()))?;
+        if let Some(parent) = safe.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        entry.unpack(&safe).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -102,9 +162,20 @@ pub async fn crucible_chat(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("POST {url} (is Ollama running?): {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Ollama chat error: {e}"))?;
+        .map_err(|e| format!("POST {url} (is Ollama running?): {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        // Ollama returns 404 with `{"error":"model '…' not found"}` when the chat
+        // model isn't pulled — surface that body instead of a bare status code.
+        let detail = resp.text().await.unwrap_or_default();
+        let detail = detail.trim();
+        if status.as_u16() == 404 {
+            return Err(format!(
+                "Ollama has no model '{model}'. Pull it with `ollama pull {model}`, or set a different chat model in settings. ({detail})"
+            ));
+        }
+        return Err(format!("Ollama chat {status}: {detail}"));
+    }
 
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
@@ -207,4 +278,49 @@ pub async fn exec_allowlist_set(
         .error_for_status()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn within_allows_nested_and_rejects_escape() {
+        let dest = Path::new("/cache/idx");
+        // legitimate entries
+        assert!(within(dest, Path::new("/cache/idx/data/a.lance")).is_some());
+        assert!(within(dest, &Path::new("/cache/idx").join("./manifest.json")).is_some());
+        assert!(within(dest, Path::new("/cache/idx")).is_some());
+        // path traversal out of dest
+        assert!(within(dest, Path::new("/cache/idx/../evil")).is_none());
+        assert!(within(dest, Path::new("/cache/idx/a/../../evil")).is_none());
+        // unrelated absolute path
+        assert!(within(dest, Path::new("/etc/passwd")).is_none());
+    }
+
+    #[test]
+    fn extract_targz_round_trips_and_blocks_traversal() {
+        let tmp = std::env::temp_dir().join(format!("crucible-test-{}", std::process::id()));
+        let src = tmp.join("src");
+        let sub = src.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(src.join("manifest.json"), b"{}").unwrap();
+        std::fs::write(sub.join("data.lance"), b"xyz").unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            tar.append_dir_all(".", &src).unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+
+        let out = tmp.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        extract_targz(&buf, &out).unwrap();
+        assert!(out.join("manifest.json").exists());
+        assert!(out.join("sub").join("data.lance").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

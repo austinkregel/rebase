@@ -18,6 +18,8 @@ export interface PublicClient {
   release?: string
   hostname?: string
   arch?: string
+  /** Agent user's home dir, used to persist tool caches (the indexer binary). */
+  home?: string
   cpus?: string
   agentVersion?: string
   /** Direct-connection advertisement (present when the agent exposes a P2P endpoint). */
