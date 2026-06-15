@@ -20,10 +20,21 @@ export interface Project {
   createdAt: number
 }
 
+/** Persisted UI state for the Project explorer — which project is open and which
+ *  are expanded. Kept separate from the projects array (different lifecycle) and
+ *  holds only ids, never any server-side content. */
+interface ProjectsUi {
+  activeId: string | null
+  expandedIds: string[]
+}
+const UI_KEY = 'projects-ui'
+
 export const useProjectsStore = defineStore('projects', {
   state: () => ({
     projects: [] as Project[],
     activeId: null as string | null,
+    /** Project ids whose root list is expanded in the explorer. */
+    expandedIds: new Set<string>(),
     loaded: false,
   }),
 
@@ -45,11 +56,30 @@ export const useProjectsStore = defineStore('projects', {
         ...p,
         rootPaths: p.rootPaths?.length ? p.rootPaths.map(normalizeRoot) : [normalizeRoot(p.rootPath ?? '/')],
       }))
+      // Restore which project was open / expanded, dropping any since deleted.
+      const ui = await loadValue<ProjectsUi>(UI_KEY, { activeId: null, expandedIds: [] })
+      const exists = new Set(this.projects.map((p) => p.id))
+      this.activeId = ui.activeId && exists.has(ui.activeId) ? ui.activeId : null
+      this.expandedIds = new Set((ui.expandedIds ?? []).filter((id) => exists.has(id)))
       this.loaded = true
     },
 
     async persist() {
       await saveValue('projects', this.projects)
+    },
+
+    persistUi() {
+      void saveValue<ProjectsUi>(UI_KEY, {
+        activeId: this.activeId,
+        expandedIds: [...this.expandedIds],
+      })
+    },
+
+    /** Expand/collapse a project's root list in the explorer (persisted). */
+    setExpanded(id: string, expanded: boolean) {
+      if (expanded) this.expandedIds.add(id)
+      else this.expandedIds.delete(id)
+      this.persistUi()
     },
 
     async create(input: {
@@ -72,6 +102,8 @@ export const useProjectsStore = defineStore('projects', {
     async remove(id: string) {
       this.projects = this.projects.filter((p) => p.id !== id)
       if (this.activeId === id) this.activeId = null
+      this.expandedIds.delete(id)
+      this.persistUi()
       await this.persist()
     },
 
@@ -106,6 +138,8 @@ export const useProjectsStore = defineStore('projects', {
       const project = this.projects.find((p) => p.id === id)
       if (!project) return
       this.activeId = id
+      // Remember the open project so a refresh can reopen it once its server is back.
+      this.persistUi()
       const session = useSessionStore()
       // The File explorer browse root is independent; just select the server.
       session.selectAgent(project.clientId)

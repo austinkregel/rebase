@@ -20,8 +20,6 @@ const files = useFilesStore()
 const creating = ref(false)
 const name = ref('')
 
-// Which projects are expanded (showing their roots). Project ids.
-const expandedProjects = ref(new Set<string>())
 // Listing errors keyed by root path.
 const errors = reactive<Record<string, string>>({})
 
@@ -31,7 +29,7 @@ const addingTo = ref<string | null>(null)
 const creatingAt = ref<{ root: string; kind: 'file' | 'folder' } | null>(null)
 
 function projectExpanded(p: Project) {
-  return expandedProjects.value.has(p.id)
+  return projects.expandedIds.has(p.id)
 }
 function rootExpanded(root: string) {
   return files.expanded.has(root)
@@ -53,15 +51,15 @@ async function saveNewProject() {
   })
   creating.value = false
   name.value = ''
-  expandedProjects.value.add(p.id)
+  projects.setExpanded(p.id, true)
 }
 
 async function toggleProject(p: Project) {
   if (projectExpanded(p)) {
-    expandedProjects.value.delete(p.id)
+    projects.setExpanded(p.id, false)
     return
   }
-  expandedProjects.value.add(p.id)
+  projects.setExpanded(p.id, true)
   // Expand + load each root so opening a project reveals its trees.
   for (const root of p.rootPaths) {
     if (!rootExpanded(root)) await toggleRoot(p.clientId, root)
@@ -95,7 +93,7 @@ async function commitRename(p: Project, value: string) {
 }
 
 function startAddRoot(p: Project) {
-  expandedProjects.value.add(p.id)
+  projects.setExpanded(p.id, true)
   addingTo.value = p.id
 }
 async function commitAddRoot(p: Project, path: string) {
@@ -151,7 +149,7 @@ function rootMenu(event: MouseEvent, p: Project, root: string) {
     {
       label: 'Remove from Project',
       action: () => {
-        files.expanded.delete(root)
+        if (files.expanded.delete(root)) files.persistExpanded(p.clientId)
         void projects.removeRoot(p.id, root)
       },
       danger: true,

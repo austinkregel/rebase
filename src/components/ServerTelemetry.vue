@@ -21,9 +21,9 @@ const rows = computed(() => {
     {
       key: 'disk',
       label: 'disk',
-      pct: t.worstDiskPct,
+      pct: t.rootDiskPct,
       warn: t.diskWarning,
-      title: t.worstDiskMount ? `${t.worstDiskMount} ${t.worstDiskPct}%` : '',
+      title: t.rootDiskMount ? `${t.rootDiskMount} ${t.rootDiskPct}%` : '',
     },
   ].filter((r) => r.pct !== null)
 })

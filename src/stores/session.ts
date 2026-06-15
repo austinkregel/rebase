@@ -120,6 +120,8 @@ export const useSessionStore = defineStore('session', {
         // / elsewhere). Projects own their own roots independently.
         const platformName = clientId ? useAgentsStore().byId(clientId)?.platform : undefined
         files.setBrowseRoot(defaultRootForPlatform(platformName))
+        // Bring back the directory tree the user last had open on this server.
+        if (clientId) void files.restore(clientId)
       }
       this.activeClientId = clientId
     },

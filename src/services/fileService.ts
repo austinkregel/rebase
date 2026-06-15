@@ -65,12 +65,23 @@ export class FileService {
    * primitive — git status, build, test, lint, … are client-side helpers over
    * this. `cwd` (when set) is confined to the agent's allowed roots.
    */
-  async exec(clientId: string, command: string, cwd?: string): Promise<ExecResult> {
+  async exec(
+    clientId: string,
+    command: string,
+    cwd?: string,
+    opts?: { timeoutSec?: number; timeoutMs?: number },
+  ): Promise<ExecResult> {
     return this.rpc.call<ExecResult>(
       'exec_request',
       'exec_result',
-      { clientId, requestId: newRequestId(), command, cwd: cwd ?? '' },
-      { timeoutMs: LIST_TIMEOUT_MS },
+      {
+        clientId,
+        requestId: newRequestId(),
+        command,
+        cwd: cwd ?? '',
+        ...(opts?.timeoutSec ? { timeoutSec: opts.timeoutSec } : {}),
+      },
+      { timeoutMs: opts?.timeoutMs ?? LIST_TIMEOUT_MS },
     )
   }
 
@@ -167,14 +178,28 @@ export class FileService {
    * after finish — each step waits for its own result frame.
    */
   async write(clientId: string, path: string, content: string): Promise<void> {
-    const requestId = newRequestId()
-    const bytes = encodeText(content)
+    await this.writeBytes(clientId, path, encodeText(content))
+  }
 
-    const started = await this.rpc.call<FilePutResult>(
-      'file_put_start',
-      'file_put_result',
-      { clientId, requestId, path, size: bytes.length, overwrite: true, force: false },
-    )
+  /** Write raw bytes (e.g. an uploaded binary) via the chunked upload flow, with
+   *  an optional unix mode string ("0755") applied on creation. */
+  async writeBytes(
+    clientId: string,
+    path: string,
+    bytes: Uint8Array,
+    mode?: string,
+  ): Promise<void> {
+    const requestId = newRequestId()
+
+    const started = await this.rpc.call<FilePutResult>('file_put_start', 'file_put_result', {
+      clientId,
+      requestId,
+      path,
+      size: bytes.length,
+      overwrite: true,
+      force: false,
+      ...(mode ? { mode } : {}),
+    })
     if (!started.ok) throw new FileOpError('write', path, started.error ?? 'upload rejected')
 
     // The final result arrives only after finish, but a failed chunk emits an

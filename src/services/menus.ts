@@ -14,6 +14,7 @@ export type MenuId =
   | 'projectRoot/context'
   | 'server/context'
   | 'editorTab/context'
+  | 'terminal/context'
 
 export interface FileMenuContext {
   clientId: string
@@ -40,6 +41,10 @@ export interface ServerMenuContext {
 export interface EditorTabMenuContext {
   clientId?: string
   path?: string
+}
+export interface TerminalMenuContext {
+  clientId: string
+  sessionId?: string
 }
 
 export interface MenuContribution<C = unknown> {

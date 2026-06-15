@@ -60,4 +60,26 @@ describe('projects store — multi-root', () => {
     await fresh.load()
     expect(fresh.projects[0].rootPaths).toEqual(['/a', '/b'])
   })
+
+  it('restores the open + expanded projects across a reload', async () => {
+    const projects = useProjectsStore()
+    const p = await projects.create({ name: 'a', controlPlane: null, clientId: 'n', rootPaths: ['/a'] })
+    projects.setExpanded(p.id, true)
+    projects.open(p.id)
+
+    setActivePinia(createPinia())
+    const fresh = useProjectsStore()
+    await fresh.load()
+    expect(fresh.activeId).toBe(p.id)
+    expect(fresh.expandedIds.has(p.id)).toBe(true)
+  })
+
+  it('drops UI state for projects that no longer exist', async () => {
+    saved['projects'] = []
+    saved['projects-ui'] = { activeId: 'gone', expandedIds: ['gone'] }
+    const projects = useProjectsStore()
+    await projects.load()
+    expect(projects.activeId).toBeNull()
+    expect(projects.expandedIds.size).toBe(0)
+  })
 })

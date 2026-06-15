@@ -20,8 +20,16 @@ describe('parseTelemetry', () => {
     const t = parseTelemetry(stats)!
     expect(t.cpuPct).toBe(42)
     expect(t.memPct).toBe(50)
-    expect(t.worstDiskPct).toBe(80)
-    expect(t.worstDiskMount).toBe('/data')
+    // Only the root mount is reported, even if another mount is fuller.
+    expect(t.rootDiskPct).toBe(55)
+    expect(t.rootDiskMount).toBe('/')
+    expect(t.diskWarning).toBe(false)
+  })
+
+  it('ignores non-root mounts entirely', () => {
+    const t = parseTelemetry({ disk: [{ mount: '/data', capacity: 95 }] })!
+    expect(t.rootDiskPct).toBeNull()
+    expect(t.rootDiskMount).toBeNull()
     expect(t.diskWarning).toBe(false)
   })
 
@@ -33,7 +41,7 @@ describe('parseTelemetry', () => {
   it('flags a near-full disk', () => {
     const t = parseTelemetry({ disk: [{ mount: '/', capacity: DISK_WARN_PCT }] })!
     expect(t.diskWarning).toBe(true)
-    expect(t.worstDiskMount).toBe('/')
+    expect(t.rootDiskMount).toBe('/')
   })
 
   it('hides battery and thermal when absent (servers)', () => {

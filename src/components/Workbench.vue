@@ -13,7 +13,8 @@ import StatusTray from './StatusTray.vue'
 import IconButton from './ui/IconButton.vue'
 import { useFilesStore, type OpenFile } from '@/stores/files'
 import { useSessionStore } from '@/stores/session'
-import { dock } from '@/services/dock'
+import { dock, type OpenTerminalOptions } from '@/services/dock'
+import { setActiveTerminal } from '@/services/terminals'
 import { registerCommands } from '@/services/commands'
 
 const files = useFilesStore()
@@ -21,7 +22,7 @@ const session = useSessionStore()
 
 // --- Column layout (IDEA-style frame around the editor) ---
 const FRAME_KEY = 'rebase.frame.v1'
-const widths = reactive({ servers: 190, project: 230, tools: 240 })
+const widths = reactive({ servers: 190, project: 230, tools: 340 })
 const serversOpen = ref(true)
 const toolsOpen = ref(false)
 
@@ -93,14 +94,21 @@ function addEditorPanel(api: DockviewApi, f: OpenFile) {
   editorEmpty.value = false
 }
 
-// Open a terminal on demand — a fresh workspace has none.
-function openTerminal() {
+// Open a terminal on demand — a fresh workspace has none. The terminal is bound
+// to a server (the active agent unless an opener passes one) and to an optional
+// initial cwd, both carried in panel params so the session survives a server
+// switch.
+function openTerminal(opts?: OpenTerminalOptions) {
   const api = dockApi.value
   if (!api) return
+  const clientId = opts?.clientId ?? session.activeClientId
+  if (!clientId) return
+  const seq = ++terminalSeq
   api.addPanel({
-    id: `terminal-${++terminalSeq}`,
+    id: `terminal-${seq}`,
     component: 'terminal',
-    title: 'Terminal',
+    title: `Terminal ${seq}`,
+    params: { clientId, seq, initialCwd: opts?.initialCwd },
     position:
       editorGroupId && api.getGroup(editorGroupId)
         ? { referenceGroup: editorGroupId as string, direction: 'below' }
@@ -138,6 +146,7 @@ function onReady(event: DockviewReadyEvent) {
   })
   api.onDidActivePanelChange((panel) => {
     if (panel && editorIds.has(panel.id)) files.activePath = panel.id
+    setActiveTerminal(panel && panel.id.startsWith('terminal-') ? panel.id : null)
   })
   api.onDidLayoutChange(() => {
     editorEmpty.value = api.panels.length === 0
@@ -149,6 +158,8 @@ function onReady(event: DockviewReadyEvent) {
   })
 
   dock.openTerminal = openTerminal
+  dock.focusTerminal = (panelId) => api.getPanel(panelId)?.api.setActive()
+  dock.closeTerminal = (panelId) => api.getPanel(panelId)?.api.close()
 }
 
 watch(

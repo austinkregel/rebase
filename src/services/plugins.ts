@@ -4,6 +4,7 @@ import { registerMenuItem, type MenuContribution } from './menus'
 import { registerView, type ViewContribution } from './views'
 import { registerViewer, type ViewerContribution } from './viewers'
 import { registerKeybinding, type Binding } from './keybindings'
+import type { OpenTerminalOptions } from './dock'
 
 /**
  * In-process plugin host. Plugins are trusted modules (bundled first-party for
@@ -15,7 +16,7 @@ import { registerKeybinding, type Binding } from './keybindings'
 
 /** Imperative app actions a plugin can't own (provided by the Workbench). */
 export interface HostCapabilities {
-  openTerminal: () => void
+  openTerminal: (opts?: OpenTerminalOptions) => void
 }
 
 export interface PluginContext {
@@ -66,7 +67,16 @@ export async function activatePlugins(plugins: RebasePlugin[], host: HostCapabil
       registerKeybinding: (b) => track(registerKeybinding(b)),
     }
     active.set(plugin.id, { plugin, disposers })
-    await plugin.activate(ctx)
+    try {
+      await plugin.activate(ctx)
+    } catch (err) {
+      // Isolate failures: one plugin throwing in activate() must not abort the
+      // others (which would silently drop their views/menus/status items). Roll
+      // back this plugin's partial contributions and carry on.
+      console.error(`[plugins] failed to activate "${plugin.id}"`, err)
+      disposers.forEach((d) => d())
+      active.delete(plugin.id)
+    }
   }
 }
 

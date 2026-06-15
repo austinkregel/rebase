@@ -1,6 +1,7 @@
 mod codesearch;
 mod config;
 mod connection;
+mod crucible;
 mod oidc;
 mod tokens;
 mod transport;
@@ -249,7 +250,13 @@ pub fn run() {
             connect,
             disconnect,
             emit,
-            search_code
+            search_code,
+            crucible::crucible_local_index_dir,
+            crucible::crucible_index_exists,
+            crucible::crucible_extract_index,
+            crucible::crucible_chat,
+            crucible::exec_allowlist_get,
+            crucible::exec_allowlist_set
         ])
         .run(tauri::generate_context!())
         .expect("error while running rebase");

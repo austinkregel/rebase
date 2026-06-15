@@ -44,4 +44,22 @@ describe('files store — single browse root (File explorer)', () => {
     expect(files.expanded.size).toBe(0)
     expect(files.openFiles).toHaveLength(0)
   })
+
+  it('toggleDir records the expanded path under its client', async () => {
+    const files = useFilesStore()
+    await files.toggleDir('c1', '/srv/app')
+    expect(files.expandedByClient['c1']).toEqual(['/srv/app'])
+    await files.toggleDir('c1', '/srv/app') // collapse
+    expect(files.expandedByClient['c1']).toEqual([])
+  })
+
+  it('restore rehydrates a server’s expanded tree and re-fetches listings', async () => {
+    const files = useFilesStore()
+    files.expandedByClient['c2'] = ['/srv/a', '/srv/b']
+    await files.restore('c2')
+    expect([...files.expanded].sort()).toEqual(['/srv/a', '/srv/b'])
+    // Listings were re-read (not persisted) — both dirs now have an entry array.
+    expect(files.tree['/srv/a']).toBeDefined()
+    expect(files.tree['/srv/b']).toBeDefined()
+  })
 })

@@ -8,6 +8,8 @@ import { useSettingsStore } from '@/stores/settings'
 import { useProjectsStore } from '@/stores/projects'
 import { viewerFor } from '@/services/viewers'
 import { mimeForPath } from '@/services/mime'
+import { notify } from '@/services/notifications'
+import { baseName } from '@/services/paths'
 
 // One panel per open file. A content-aware viewer may claim the file by MIME
 // type (image/pdf/media/zip/markdown); otherwise it falls back to CodeMirror.
@@ -44,7 +46,10 @@ async function handleSave() {
   try {
     await files.saveFile(path)
   } catch (err) {
-    console.error('save failed', err)
+    notify.error(`Couldn't save ${baseName(path)}`, {
+      source: 'Editor',
+      body: err instanceof Error ? err.message : String(err),
+    })
   }
 }
 

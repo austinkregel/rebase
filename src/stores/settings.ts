@@ -8,16 +8,18 @@ import {
 } from '@/services/appearance'
 
 export interface IndexingSettings {
+  /** Ollama endpoint used for both embeddings and Crucible chat. */
   ollamaUrl: string
+  /** Embedding model the index is built + queried with. */
   embedModel: string
-  /** Last index opened in the search panel (local LanceDB dir). */
-  indexPath: string
+  /** Chat model Crucible streams answers from (Ollama). */
+  chatModel: string
 }
 
 const defaultIndexing: IndexingSettings = {
   ollamaUrl: 'http://localhost:11434',
   embedModel: 'nomic-embed-text',
-  indexPath: '',
+  chatModel: 'qwen2.5-coder',
 }
 
 export const useSettingsStore = defineStore('settings', {

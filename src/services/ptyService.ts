@@ -14,37 +14,71 @@ export interface ShellSession {
 const START_TIMEOUT_MS = 15_000
 
 /**
- * PTY sessions over the dashboard socket. `shell_start` has no requestId —
- * the server assigns a session UUID and replies with `shell_started`, so we
- * pair the next started-frame for our clientId with this request.
+ * `shell_start` carries no requestId — the server only echoes the `clientId` on
+ * `shell_started`. With a single terminal that's enough, but multiple terminals
+ * on the same server can't be told apart by clientId alone (the first opener
+ * would steal the second's reply). So we keep a FIFO of pending opens per
+ * clientId and pair each `shell_started` with the oldest pending open for that
+ * clientId — assuming the server answers requests in order.
  */
+interface PendingOpen {
+  clientId: string
+  resolve: (session: ShellSession) => void
+  reject: (err: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+const pendingOpens: PendingOpen[] = []
+let listenersInstalled = false
+
+function settle(p: PendingOpen): void {
+  clearTimeout(p.timer)
+  const i = pendingOpens.indexOf(p)
+  if (i !== -1) pendingOpens.splice(i, 1)
+}
+
+function installListeners(): void {
+  if (listenersInstalled) return
+  listenersInstalled = true
+  socket.on('shell_started', (data) => {
+    const started = data as unknown as ShellStarted
+    const p = pendingOpens.find((x) => x.clientId === started.clientId)
+    if (!p) return
+    settle(p)
+    console.debug(`[pty] shell_started session=${started.session} clientId=${started.clientId}`)
+    p.resolve(makeSession(started))
+  })
+  socket.on('shell_error', (data) => {
+    // shell_error carries no clientId/session — fail the oldest pending open.
+    const message = (data as unknown as ShellError).message ?? 'shell error'
+    console.warn(`[pty] shell_error: ${message}`)
+    const p = pendingOpens[0]
+    if (p) {
+      settle(p)
+      p.reject(new Error(message))
+    }
+  })
+}
+
 export function openShell(clientId: string): Promise<ShellSession> {
+  installListeners()
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup()
-      reject(new Error('Timed out waiting for shell_started'))
-    }, START_TIMEOUT_MS)
-
-    const stopStarted = socket.on('shell_started', (data) => {
-      const started = data as unknown as ShellStarted
-      if (started.clientId !== clientId) return
-      cleanup()
-      resolve(makeSession(started))
-    })
-    const stopError = socket.on('shell_error', (data) => {
-      cleanup()
-      reject(new Error((data as unknown as ShellError).message ?? 'shell error'))
-    })
-    const cleanup = () => {
-      clearTimeout(timer)
-      stopStarted()
-      stopError()
-    }
-
+    console.debug(`[pty] → shell_start clientId=${clientId}`)
     if (!socket.emit('shell_start', { clientId })) {
-      cleanup()
+      console.warn('[pty] shell_start not sent — socket not connected to control plane')
       reject(new Error('Not connected to control plane'))
+      return
     }
+    const p: PendingOpen = {
+      clientId,
+      resolve,
+      reject,
+      timer: setTimeout(() => {
+        settle(p)
+        console.warn(`[pty] shell_start timed out after ${START_TIMEOUT_MS}ms for clientId=${clientId} — no shell_started reply (is PTY deployed on that agent?)`)
+        reject(new Error('Timed out waiting for shell_started'))
+      }, START_TIMEOUT_MS),
+    }
+    pendingOpens.push(p)
   })
 }
 

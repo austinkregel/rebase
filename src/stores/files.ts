@@ -4,7 +4,14 @@ import { useGitStore } from '@/stores/git'
 import { useProjectsStore } from '@/stores/projects'
 import { normalizeRoot } from '@/services/paths'
 import { viewerFor } from '@/services/viewers'
+import { loadValue, saveValue } from '@/services/store'
 import type { DirListEntry } from '@/transport/types'
+
+// Which directories are expanded, persisted per server. We save only the *set of
+// open paths* (never the listings themselves) so a refresh can restore the tree
+// shape and re-fetch fresh contents — keeping us safe if the server's filesystem
+// changed since last visit.
+const EXPANDED_KEY = 'tree-expanded'
 
 export interface OpenFile {
   path: string
@@ -26,6 +33,9 @@ export const useFilesStore = defineStore('files', {
     /** Directory listings keyed by path, for the active agent. */
     tree: {} as Record<string, DirListEntry[]>,
     expanded: new Set<string>(),
+    /** Persisted expanded-directory paths, keyed by clientId. Mirrors `expanded`
+     *  for the active server; the source of truth across refreshes. */
+    expandedByClient: {} as Record<string, string[]>,
     openFiles: [] as OpenFile[],
     activePath: null as string | null,
     /** The File explorer's current root — a single, ad-hoc browse location
@@ -62,6 +72,35 @@ export const useFilesStore = defineStore('files', {
       this.browseRoot = normalizeRoot(path)
     },
 
+    /** Hydrate the persisted expanded-directory map (call once at startup). */
+    async loadExpanded() {
+      this.expandedByClient = await loadValue<Record<string, string[]>>(EXPANDED_KEY, {})
+    },
+
+    /** Snapshot the active server's expanded set into the persisted map. */
+    persistExpanded(clientId: string) {
+      this.expandedByClient[clientId] = [...this.expanded]
+      void saveValue(EXPANDED_KEY, this.expandedByClient)
+    },
+
+    /** Restore a server's expanded directories and re-fetch their listings.
+     *  Listings are intentionally re-read (never persisted) so a changed remote
+     *  filesystem can't show stale entries. Paths that no longer list are dropped. */
+    async restore(clientId: string) {
+      const paths = this.expandedByClient[clientId] ?? []
+      this.expanded = new Set(paths)
+      await Promise.all(
+        paths.map(async (path) => {
+          try {
+            await this.loadDir(clientId, path)
+          } catch {
+            this.expanded.delete(path)
+          }
+        }),
+      )
+      this.persistExpanded(clientId)
+    },
+
     async loadDir(clientId: string, path: string) {
       const entries = await fileService.list(clientId, path)
       // Directories first, then files, both alphabetical.
@@ -74,6 +113,7 @@ export const useFilesStore = defineStore('files', {
     async toggleDir(clientId: string, path: string) {
       if (this.expanded.has(path)) {
         this.expanded.delete(path)
+        this.persistExpanded(clientId)
         return
       }
       this.expanded.add(path)
@@ -85,6 +125,7 @@ export const useFilesStore = defineStore('files', {
           throw err
         }
       }
+      this.persistExpanded(clientId)
     },
 
     async openFile(clientId: string, path: string) {
@@ -184,6 +225,7 @@ export const useFilesStore = defineStore('files', {
       if (this.expanded.has(oldPath)) {
         this.expanded.delete(oldPath)
         this.expanded.add(newPath)
+        this.persistExpanded(clientId)
       }
       for (const dir of new Set(reloadDirs)) await this.loadDir(clientId, dir)
     },
@@ -192,7 +234,7 @@ export const useFilesStore = defineStore('files', {
     async removeEntry(clientId: string, path: string, recursive: boolean, reloadDir: string) {
       await fileService.delete(clientId, path, recursive)
       this.closeFile(path)
-      this.expanded.delete(path)
+      if (this.expanded.delete(path)) this.persistExpanded(clientId)
       await this.loadDir(clientId, reloadDir)
     },
 

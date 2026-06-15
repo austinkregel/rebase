@@ -39,6 +39,10 @@ export interface Platform {
   onAuthChanged(handler: () => void): () => void
   /** Fires when an out-of-band sign-in attempt fails (bad deep-link token). */
   onAuthError(handler: (message: string) => void): () => void
+  /** Read the control plane's exec allowlist (commands agents may run). */
+  getExecAllowlist(controlPlane?: string): Promise<string[]>
+  /** Replace the control plane's exec allowlist (it re-pushes to all agents). */
+  setExecAllowlist(commands: string[], controlPlane?: string): Promise<void>
 }
 
 class TauriPlatform implements Platform {
@@ -86,6 +90,14 @@ class TauriPlatform implements Platform {
     })
     return () => unlisten?.()
   }
+
+  async getExecAllowlist(controlPlane?: string): Promise<string[]> {
+    return await invoke<string[]>('exec_allowlist_get', { controlPlane: controlPlane ?? null })
+  }
+
+  async setExecAllowlist(commands: string[], controlPlane?: string): Promise<void> {
+    await invoke('exec_allowlist_set', { commands, controlPlane: controlPlane ?? null })
+  }
 }
 
 class BrowserPlatform implements Platform {
@@ -129,6 +141,23 @@ class BrowserPlatform implements Platform {
   onAuthError(): () => void {
     // No out-of-band sign-in in the browser; errors surface on the login page.
     return () => {}
+  }
+
+  // The browser build is served from the control plane, so its API is same-origin
+  // and authenticated by the session cookie.
+  async getExecAllowlist(): Promise<string[]> {
+    const res = await fetch('/api/server/exec-allowlist', { credentials: 'include' })
+    const json = (await res.json()) as { commands?: string[] }
+    return json.commands ?? []
+  }
+
+  async setExecAllowlist(commands: string[]): Promise<void> {
+    await fetch('/api/server/exec-allowlist', {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ commands }),
+    })
   }
 }
 

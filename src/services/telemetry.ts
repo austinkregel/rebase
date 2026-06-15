@@ -17,11 +17,11 @@ export interface TelemetryView {
   cpuPct: number | null
   /** Memory utilization 0–100, or null. */
   memPct: number | null
-  /** Worst (highest) disk utilization 0–100 across mounts, or null. */
-  worstDiskPct: number | null
-  /** Mount point of the worst disk, for a tooltip. */
-  worstDiskMount: string | null
-  /** True when any disk is at/above the near-full threshold. */
+  /** Root (`/`) disk utilization 0–100, or null when unknown. */
+  rootDiskPct: number | null
+  /** Mount point reported for the root disk, for a tooltip. */
+  rootDiskMount: string | null
+  /** True when the root disk is at/above the near-full threshold. */
   diskWarning: boolean
   /** Hottest sensor reading in °C, or null. */
   maxTempC: number | null
@@ -45,16 +45,14 @@ function memPercent(stats: StatsData): number | null {
   return clampPct((used / mem.total) * 100)
 }
 
-function worstDisk(stats: StatsData): { pct: number; mount: string } | null {
+function rootDisk(stats: StatsData): { pct: number; mount: string } | null {
   const disks = stats.disk
   if (!Array.isArray(disks) || disks.length === 0) return null
-  let worst: { pct: number; mount: string } | null = null
-  for (const d of disks) {
-    const pct = clampPct(d.capacity)
-    if (pct === null) continue
-    if (!worst || pct > worst.pct) worst = { pct, mount: d.mount ?? '' }
-  }
-  return worst
+  const root = disks.find((d) => d.mount === '/')
+  if (!root) return null
+  const pct = clampPct(root.capacity)
+  if (pct === null) return null
+  return { pct, mount: root.mount ?? '' }
 }
 
 function hottest(stats: StatsData): { tempC: number; warning: boolean } | null {
@@ -90,13 +88,13 @@ function batteryView(stats: StatsData): BatteryView | null {
 
 export function parseTelemetry(stats: StatsData | undefined | null): TelemetryView | null {
   if (!stats) return null
-  const disk = worstDisk(stats)
+  const disk = rootDisk(stats)
   const temp = hottest(stats)
   return {
     cpuPct: clampPct(stats.cpu),
     memPct: memPercent(stats),
-    worstDiskPct: disk?.pct ?? null,
-    worstDiskMount: disk?.mount ?? null,
+    rootDiskPct: disk?.pct ?? null,
+    rootDiskMount: disk?.mount ?? null,
     diskWarning: disk !== null && disk.pct >= DISK_WARN_PCT,
     maxTempC: temp?.tempC ?? null,
     tempWarning: temp?.warning ?? false,

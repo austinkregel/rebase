@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { XMarkIcon } from '@heroicons/vue/20/solid'
 import { useFilesStore } from '@/stores/files'
 import { openContextMenu, type ContextMenuItem } from '@/services/contextMenu'
@@ -13,6 +13,7 @@ interface PanelApi {
   id: string
   title?: string
   close: () => void
+  onDidTitleChange?: (cb: (e: { title: string }) => void) => { dispose: () => void }
   group?: { panels: { id: string; api: { close: () => void } }[] }
 }
 const props = defineProps<{
@@ -23,7 +24,15 @@ const files = useFilesStore()
 
 const api = computed(() => props.params.api)
 const path = computed(() => props.params.params?.path ?? '')
-const title = computed(() => api.value?.title || baseName(path.value) || path.value)
+
+// `api.title` is a plain getter — it doesn't re-render when a panel renames
+// itself (e.g. a terminal adopting its name). Track dockview's title event so
+// the tab adopts and live-updates the title; editors fall back to the basename.
+const liveTitle = ref(props.params.api.title)
+const stopTitle = props.params.api.onDidTitleChange?.((e) => (liveTitle.value = e.title))
+onBeforeUnmount(() => stopTitle?.dispose())
+
+const title = computed(() => liveTitle.value || baseName(path.value) || path.value)
 const isEditor = computed(() => !!path.value) // editor tabs carry a path; terminals don't
 const dirty = computed(() => {
   const f = files.openFiles.find((x) => x.path === path.value)

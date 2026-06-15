@@ -19,16 +19,18 @@ const toggles: { key: keyof EditorSettings; label: string }[] = [
   { key: 'indentWithTabs', label: 'Indent with tabs' },
 ]
 
-// Live-preview the UI scale while dragging (apply only, no persistence); commit
-// to the store on release so the Tauri file store isn't written every tick.
+// Applying the UI scale sets CSS `zoom` on <html>, which reflows the whole app —
+// doing that mid-drag makes the UI jitter. So while dragging we only move the `%`
+// label (no reflow); the zoom is applied and persisted once, on release (`@change`
+// fires on mouse-up / after a keyboard step).
 const scale = ref(settings.appearance.uiScale)
 watch(() => settings.appearance.uiScale, (v) => (scale.value = v))
 
 function previewScale(value: number) {
   scale.value = clampScale(value)
-  applyAppearance({ ...settings.appearance, uiScale: scale.value })
 }
 function commitScale() {
+  applyAppearance({ ...settings.appearance, uiScale: scale.value })
   void settings.updateAppearance({ uiScale: scale.value })
 }
 </script>
@@ -132,6 +134,43 @@ function commitScale() {
           />
         </Switch>
       </div>
+    </div>
+
+    <SectionHeader>crucible</SectionHeader>
+    <div class="flex flex-col gap-3 p-3">
+      <label class="flex flex-col gap-1.5">
+        <span class="text-sm text-fg">Ollama URL</span>
+        <input
+          :value="settings.indexing.ollamaUrl"
+          class="w-full rounded border border-line bg-elevated px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+          placeholder="http://localhost:11434"
+          spellcheck="false"
+          autocomplete="off"
+          @change="settings.updateIndexing({ ollamaUrl: ($event.target as HTMLInputElement).value })"
+        />
+      </label>
+      <label class="flex items-center justify-between gap-3">
+        <span class="text-sm text-fg">Chat model</span>
+        <input
+          :value="settings.indexing.chatModel"
+          class="w-44 rounded border border-line bg-elevated px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+          placeholder="qwen2.5-coder"
+          spellcheck="false"
+          autocomplete="off"
+          @change="settings.updateIndexing({ chatModel: ($event.target as HTMLInputElement).value })"
+        />
+      </label>
+      <label class="flex items-center justify-between gap-3">
+        <span class="text-sm text-fg">Embedding model</span>
+        <input
+          :value="settings.indexing.embedModel"
+          class="w-44 rounded border border-line bg-elevated px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+          placeholder="nomic-embed-text"
+          spellcheck="false"
+          autocomplete="off"
+          @change="settings.updateIndexing({ embedModel: ($event.target as HTMLInputElement).value })"
+        />
+      </label>
     </div>
   </div>
 </template>
