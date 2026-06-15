@@ -150,16 +150,20 @@ export const useFilesStore = defineStore('files', {
         readOnly: viewer?.binary || undefined,
       }
       this.openFiles.push(file)
+      // Mutate the reactive proxy stored in the array, NOT the local `file`
+      // literal — writes to the raw object don't trigger reactivity, so the
+      // editor would never see `loading` flip to false (stuck "loading…").
+      const entry = this.openFiles[this.openFiles.length - 1]
       this.activePath = path
       if (viewer?.binary) return
       try {
         const content = await fileService.read(clientId, path)
-        file.content = content
-        file.savedContent = content
+        entry.content = content
+        entry.savedContent = content
       } catch (err) {
-        file.error = err instanceof Error ? err.message : String(err)
+        entry.error = err instanceof Error ? err.message : String(err)
       } finally {
-        file.loading = false
+        entry.loading = false
       }
     },
 
