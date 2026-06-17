@@ -1,9 +1,5 @@
 mod codesearch;
-mod config;
-mod connection;
 mod crucible;
-mod oidc;
-mod tokens;
 mod transport;
 
 use std::sync::Arc;
@@ -12,9 +8,10 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{Emitter, Manager, State};
 
-use config::{AppConfig, ControlPlane};
-use oidc::Auth;
-use tokens::Credential;
+use rebase_core::config::{AppConfig, ControlPlane};
+use rebase_core::oidc::Auth;
+use rebase_core::tokens::Credential;
+use rebase_core::{connection, tokens};
 use transport::Transport;
 
 #[derive(Serialize)]
@@ -53,7 +50,7 @@ fn login(control_plane: Option<String>) -> Result<(), String> {
         None => cfg.control_planes.first().cloned(),
     }
     .ok_or("no control plane configured")?;
-    let url = auth_login_url(&cp.url)?;
+    let url = auth_login_url(&cp)?;
     open::that(&url).map_err(|e| format!("failed to open browser: {e}"))?;
     Ok(())
 }
@@ -136,18 +133,8 @@ async fn emit(
 
 /// Derive the control plane's browser sign-in URL from its dashboard WS URL.
 /// e.g. wss://kratos.kregel.host:8443/ws/dashboard → https://kratos.kregel.host:8443/auth/app?redirect=rebase://callback
-fn auth_login_url(ws_url: &str) -> Result<String, String> {
-    let u = url::Url::parse(ws_url).map_err(|e| e.to_string())?;
-    let scheme = if u.scheme() == "wss" { "https" } else { "http" };
-    let host = u.host_str().ok_or("control plane url has no host")?;
-    let origin = match u.port() {
-        Some(port) => format!("{scheme}://{host}:{port}"),
-        None => format!("{scheme}://{host}"),
-    };
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("redirect", "rebase://callback")
-        .finish();
-    Ok(format!("{origin}/auth/app?{query}"))
+fn auth_login_url(cp: &rebase_core::config::ControlPlane) -> Result<String, String> {
+    cp.auth_login_url().map_err(|e| e.to_string())
 }
 
 /// Validate a token handed back over the deep link before we store it. The CP
@@ -256,7 +243,11 @@ pub fn run() {
             crucible::crucible_extract_index,
             crucible::crucible_chat,
             crucible::exec_allowlist_get,
-            crucible::exec_allowlist_set
+            crucible::exec_allowlist_set,
+            crucible::transcript_list,
+            crucible::transcript_load_conversation,
+            crucible::transcript_append_to,
+            crucible::transcript_save_meta
         ])
         .run(tauri::generate_context!())
         .expect("error while running rebase");
