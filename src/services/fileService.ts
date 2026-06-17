@@ -71,18 +71,37 @@ export class FileService {
     cwd?: string,
     opts?: { timeoutSec?: number; timeoutMs?: number },
   ): Promise<ExecResult> {
-    return this.rpc.call<ExecResult>(
+    return this.execCancellable(clientId, command, cwd, opts).result
+  }
+
+  /**
+   * Like `exec`, but returns a `cancel()` that kills the running command on the
+   * agent (via `exec_cancel`) without dropping the control-plane socket — used by
+   * the Crucible agent loop's Stop.
+   */
+  execCancellable(
+    clientId: string,
+    command: string,
+    cwd?: string,
+    opts?: { timeoutSec?: number; timeoutMs?: number },
+  ): { result: Promise<ExecResult>; cancel: () => void } {
+    const requestId = newRequestId()
+    const result = this.rpc.call<ExecResult>(
       'exec_request',
       'exec_result',
       {
         clientId,
-        requestId: newRequestId(),
+        requestId,
         command,
         cwd: cwd ?? '',
         ...(opts?.timeoutSec ? { timeoutSec: opts.timeoutSec } : {}),
       },
       { timeoutMs: opts?.timeoutMs ?? LIST_TIMEOUT_MS },
     )
+    const cancel = () => {
+      socket.emit('exec_cancel', { clientId, requestId })
+    }
+    return { result, cancel }
   }
 
   /** Stat by listing the parent — the protocol has no dedicated stat. */
