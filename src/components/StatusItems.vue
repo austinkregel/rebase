@@ -23,7 +23,7 @@ const toneClass = (t?: string) =>
       v-else-if="item.icon && !item.text"
       :icon="item.icon"
       variant="plain"
-      size="md"
+      size="lg"
       :label="item.tooltip ?? item.id"
       :class="toneClass(item.tone)"
       @click="activate(item)"
