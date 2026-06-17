@@ -75,7 +75,7 @@ function refreshGit() {
     <IconButton
       :icon="ArrowRightStartOnRectangleIcon"
       variant="plain"
-      size="md"
+      size="lg"
       label="disconnect"
       class="text-accent hover:text-accent hover:opacity-80"
       @click="session.disconnect()"
