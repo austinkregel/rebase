@@ -171,6 +171,22 @@ function commitScale() {
           @change="settings.updateIndexing({ embedModel: ($event.target as HTMLInputElement).value })"
         />
       </label>
+
+      <label class="flex flex-col gap-1.5">
+        <span class="text-sm text-fg">Agent commands</span>
+        <span class="text-2xs text-subtle">
+          Commands the chat agent may run (one per line, prefix-matched). The agent's own
+          exec allowlist still applies; empty = the agent can run nothing.
+        </span>
+        <textarea
+          :value="settings.indexing.agentCommands.join('\n')"
+          rows="5"
+          class="w-full resize-y rounded border border-line bg-elevated px-2 py-1 font-mono text-xs text-fg outline-none focus:border-accent"
+          placeholder="git status&#10;go test&#10;npm test"
+          spellcheck="false"
+          @change="settings.updateIndexing({ agentCommands: ($event.target as HTMLTextAreaElement).value.split('\n').map((s) => s.trim()).filter(Boolean) })"
+        />
+      </label>
     </div>
   </div>
 </template>

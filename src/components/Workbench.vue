@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { DockviewVue } from 'dockview-vue'
 import type { DockviewApi, DockviewReadyEvent, IDockviewPanel } from 'dockview-core'
 import { ChevronDoubleLeftIcon, ChevronDoubleRightIcon } from '@heroicons/vue/20/solid'
@@ -13,12 +13,38 @@ import StatusTray from './StatusTray.vue'
 import IconButton from './ui/IconButton.vue'
 import { useFilesStore, type OpenFile } from '@/stores/files'
 import { useSessionStore } from '@/stores/session'
+import { useAgentsStore } from '@/stores/agents'
 import { dock, type OpenTerminalOptions } from '@/services/dock'
 import { setActiveTerminal } from '@/services/terminals'
 import { registerCommands } from '@/services/commands'
+import { viewsFor } from '@/services/views'
 
 const files = useFilesStore()
 const session = useSessionStore()
+const agents = useAgentsStore()
+
+const toolTabs = computed(() => viewsFor('sidebar.tools'))
+
+// --- Hover flyouts for the collapsed sidebars ---
+const serversHover = ref(false)
+const toolsHover = ref(false)
+let serversHideTimer: ReturnType<typeof setTimeout> | null = null
+let toolsHideTimer: ReturnType<typeof setTimeout> | null = null
+
+function onServersEnter() {
+  if (serversHideTimer) { clearTimeout(serversHideTimer); serversHideTimer = null }
+  serversHover.value = true
+}
+function onServersLeave() {
+  serversHideTimer = setTimeout(() => { serversHover.value = false }, 100)
+}
+function onToolsEnter() {
+  if (toolsHideTimer) { clearTimeout(toolsHideTimer); toolsHideTimer = null }
+  toolsHover.value = true
+}
+function onToolsLeave() {
+  toolsHideTimer = setTimeout(() => { toolsHover.value = false }, 100)
+}
 
 // --- Column layout (IDEA-style frame around the editor) ---
 const FRAME_KEY = 'rebase.frame.v1'
@@ -230,14 +256,41 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
         </aside>
         <div class="w-[3px] shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent" @mousedown.prevent="startDrag('servers', $event)" />
       </template>
-      <button
+      <!-- Collapsed servers: status dots + hover flyout -->
+      <div
         v-else
-        class="flex shrink-0 cursor-pointer items-center justify-center border-r border-line bg-surface py-2.5 text-xs uppercase tracking-[0.08em] text-subtle [writing-mode:vertical-rl] hover:text-fg"
-        title="show servers"
-        @click="serversOpen = true"
+        class="relative flex w-8 shrink-0 flex-col items-center gap-0.5 border-r border-line bg-surface py-1.5"
+        @mouseenter="onServersEnter"
+        @mouseleave="onServersLeave"
       >
-        servers
-      </button>
+        <button
+          v-for="agent in agents.sortedAgents"
+          :key="agent.clientId"
+          class="flex size-[26px] items-center justify-center rounded transition-colors hover:bg-hover"
+          :class="agent.clientId === session.activeClientId ? 'bg-active' : ''"
+          :title="agent.hostname || agent.clientId"
+          @click="session.selectAgent(agent.clientId === session.activeClientId ? null : agent.clientId)"
+        >
+          <span class="size-[7px] rounded-full" :class="agent.authenticated ? 'bg-green' : 'bg-subtle'" />
+        </button>
+        <div v-if="agents.sortedAgents.length === 0" class="size-[7px] rounded-full bg-subtle/30" />
+        <button
+          class="mt-auto flex size-[26px] items-center justify-center text-subtle hover:text-fg"
+          title="expand servers"
+          @click="serversOpen = true"
+        >
+          <ChevronDoubleRightIcon class="size-3" />
+        </button>
+        <!-- Flyout: full ServersColumn on hover -->
+        <div
+          v-show="serversHover"
+          class="absolute left-full top-0 z-50 w-56 max-h-[80vh] overflow-y-auto border-y border-r border-line bg-surface shadow-xl"
+          @mouseenter="onServersEnter"
+          @mouseleave="onServersLeave"
+        >
+          <ServersColumn />
+        </div>
+      </div>
 
       <!-- Project -->
       <aside class="flex min-h-0 shrink-0 flex-col bg-surface" :style="{ width: `${widths.project}px` }">
@@ -274,14 +327,39 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
           <ToolsColumn />
         </aside>
       </template>
-      <button
+      <!-- Collapsed tools: plugin icons + hover flyout -->
+      <div
         v-else
-        class="flex shrink-0 cursor-pointer items-center justify-center border-l border-line bg-surface py-2.5 text-xs uppercase tracking-[0.08em] text-subtle [writing-mode:vertical-rl] hover:text-fg"
-        title="show tools"
-        @click="toolsOpen = true"
+        class="relative flex w-8 shrink-0 flex-col items-center gap-1 border-l border-line bg-surface py-1.5"
+        @mouseenter="onToolsEnter"
+        @mouseleave="onToolsLeave"
       >
-        tools
-      </button>
+        <button
+          v-for="tab in toolTabs"
+          :key="tab.id"
+          class="flex size-8 items-center justify-center rounded text-subtle transition-colors hover:bg-hover hover:text-fg"
+          :title="tab.title"
+          @click="toolsOpen = true"
+        >
+          <component :is="tab.icon" class="size-5" />
+        </button>
+        <button
+          class="mt-auto flex size-[26px] items-center justify-center text-subtle hover:text-fg"
+          title="expand tools"
+          @click="toolsOpen = true"
+        >
+          <ChevronDoubleLeftIcon class="size-3" />
+        </button>
+        <!-- Flyout: full ToolsColumn on hover -->
+        <div
+          v-show="toolsHover"
+          class="absolute right-full top-0 z-50 w-80 max-h-[80vh] overflow-y-auto border-y border-l border-line bg-surface shadow-xl"
+          @mouseenter="onToolsEnter"
+          @mouseleave="onToolsLeave"
+        >
+          <ToolsColumn />
+        </div>
+      </div>
     </div>
     <StatusTray />
   </div>
