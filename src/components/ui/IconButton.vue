@@ -17,7 +17,7 @@ const props = withDefaults(
 )
 
 const iconClass = computed(
-  () => ({ sm: 'size-3.5', md: 'size-4', lg: 'size-6' })[props.size],
+  () => ({ sm: 'size-3.5', md: 'size-4', lg: 'size-5' })[props.size],
 )
 // ghost = padded hover chip; plain = bare icon that only shifts color on hover.
 const chromeClass = computed(() =>
