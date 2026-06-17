@@ -48,7 +48,7 @@ function alertTone(severity?: string) {
       aria-label="notifications"
       @click="markAllRead()"
     >
-      <BellIcon class="size-4" />
+      <BellIcon class="size-5" />
       <span
         v-if="unread"
         class="absolute -right-1.5 -top-1 rounded-full px-1 text-2xs leading-[1.4] tabular-nums text-bg"
