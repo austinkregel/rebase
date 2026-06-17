@@ -10,8 +10,8 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tauri::{ipc::Channel, State};
 
-use crate::config::AppConfig;
-use crate::oidc::Auth;
+use rebase_core::config::AppConfig;
+use rebase_core::oidc::Auth;
 
 /// Caps for extracting the (agent-produced, untrusted) index archive — guards
 /// against decompression bombs.
@@ -30,6 +30,111 @@ fn safe_segment(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+// --- Chat transcript persistence -------------------------------------------
+
+/// Per-project transcript directory: `~/transcripts/{safe_project_id}/`.
+fn project_dir(project_id: &str) -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or("no home dir")?;
+    let dir = home.join("transcripts").join(safe_segment(project_id));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// One-time migration: move the old flat `~/transcripts/{pid}.jsonl` into the
+/// per-project directory as `legacy.jsonl` and write an initial `meta.json`.
+/// No-op when already migrated or when no old file exists.
+fn maybe_migrate(project_id: &str) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("no home dir")?;
+    let old = home
+        .join("transcripts")
+        .join(format!("{}.jsonl", safe_segment(project_id)));
+    if !old.exists() {
+        return Ok(());
+    }
+    let dir = project_dir(project_id)?;
+    let new_path = dir.join("legacy.jsonl");
+    if new_path.exists() {
+        return Ok(());
+    }
+    let mtime = std::fs::metadata(&old)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    std::fs::rename(&old, &new_path).map_err(|e| e.to_string())?;
+    let meta = serde_json::json!([{
+        "id": "legacy",
+        "title": "Previous conversation",
+        "createdAt": mtime,
+        "lastMessageAt": mtime,
+    }]);
+    std::fs::write(dir.join("meta.json"), meta.to_string()).map_err(|e| e.to_string())
+}
+
+/// List all conversations for a project. Runs migration transparently on first
+/// call. Returns a JSON string (array of `ConversationMeta`) ordered newest-first.
+#[tauri::command]
+pub async fn transcript_list(project_id: String) -> Result<String, String> {
+    maybe_migrate(&project_id)?;
+    let meta_path = project_dir(&project_id)?.join("meta.json");
+    match std::fs::read_to_string(&meta_path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("[]".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Load all JSONL lines for one conversation. Returns `[]` when not found yet.
+#[tauri::command]
+pub async fn transcript_load_conversation(
+    project_id: String,
+    conversation_id: String,
+) -> Result<Vec<String>, String> {
+    let path = project_dir(&project_id)?
+        .join(format!("{}.jsonl", safe_segment(&conversation_id)));
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(s
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(String::from)
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Append JSONL lines to a specific conversation's file.
+#[tauri::command]
+pub async fn transcript_append_to(
+    project_id: String,
+    conversation_id: String,
+    lines: Vec<String>,
+) -> Result<(), String> {
+    use std::io::Write;
+    let path = project_dir(&project_id)?
+        .join(format!("{}.jsonl", safe_segment(&conversation_id)));
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    for line in &lines {
+        writeln!(file, "{}", line).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Atomically rewrite the project's `meta.json` with the provided JSON string.
+#[tauri::command]
+pub async fn transcript_save_meta(
+    project_id: String,
+    meta_json: String,
+) -> Result<(), String> {
+    std::fs::write(project_dir(&project_id)?.join("meta.json"), meta_json)
+        .map_err(|e| e.to_string())
 }
 
 fn index_dir_for(client_id: &str, root: &str) -> Result<PathBuf, String> {
@@ -135,27 +240,56 @@ fn extract_targz(bytes: &[u8], dest: &Path) -> Result<(), String> {
 #[derive(Deserialize)]
 pub struct ChatMessage {
     pub role: String,
+    #[serde(default)]
     pub content: String,
+    /// For `role:"tool"` result messages.
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    /// For `role:"assistant"` messages that previously called tools (history).
+    #[serde(default)]
+    pub tool_calls: Option<serde_json::Value>,
 }
 
-/// Stream a chat completion from Ollama, forwarding each content token over the
-/// channel. Resolves when the model signals `done`. Ollama emits newline-
-/// delimited JSON objects shaped `{ "message": { "content": ... }, "done": bool }`.
+/// The assistant's reply: streamed `content` (also pushed live over the channel)
+/// plus any `tool_calls` the model wants the app to execute.
+#[derive(serde::Serialize)]
+pub struct ChatResult {
+    pub content: String,
+    pub tool_calls: Vec<serde_json::Value>,
+}
+
+/// One chat step against Ollama. Forwards content tokens over the channel as they
+/// stream, and returns the final assistant message (content + tool_calls). When
+/// `tools` is provided, the model may return tool_calls instead of (or with) text.
 #[tauri::command]
 pub async fn crucible_chat(
     ollama: String,
     model: String,
     messages: Vec<ChatMessage>,
+    tools: Option<serde_json::Value>,
     on_token: Channel<String>,
-) -> Result<(), String> {
-    let body = serde_json::json!({
-        "model": model,
-        "messages": messages
-            .iter()
-            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
-            .collect::<Vec<_>>(),
-        "stream": true,
-    });
+) -> Result<ChatResult, String> {
+    let msgs: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            let mut o = serde_json::Map::new();
+            o.insert("role".into(), serde_json::json!(m.role));
+            o.insert("content".into(), serde_json::json!(m.content));
+            if let Some(tn) = &m.tool_name {
+                o.insert("tool_name".into(), serde_json::json!(tn));
+            }
+            if let Some(tc) = &m.tool_calls {
+                o.insert("tool_calls".into(), tc.clone());
+            }
+            serde_json::Value::Object(o)
+        })
+        .collect();
+
+    let mut body = serde_json::json!({ "model": model, "messages": msgs, "stream": true });
+    if let Some(t) = tools {
+        body["tools"] = t;
+    }
+
     let url = format!("{}/api/chat", ollama.trim_end_matches('/'));
     let resp = reqwest::Client::new()
         .post(&url)
@@ -179,6 +313,8 @@ pub async fn crucible_chat(
 
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
+    let mut content = String::new();
+    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| e.to_string())?;
         buf.extend_from_slice(&chunk);
@@ -189,22 +325,24 @@ pub async fn crucible_chat(
                 continue;
             }
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
-                if let Some(tok) = v
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_str())
-                {
-                    if !tok.is_empty() {
-                        let _ = on_token.send(tok.to_string());
+                if let Some(msg) = v.get("message") {
+                    if let Some(tok) = msg.get("content").and_then(|c| c.as_str()) {
+                        if !tok.is_empty() {
+                            content.push_str(tok);
+                            let _ = on_token.send(tok.to_string());
+                        }
+                    }
+                    if let Some(tc) = msg.get("tool_calls").and_then(|c| c.as_array()) {
+                        tool_calls.extend(tc.iter().cloned());
                     }
                 }
                 if v.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
-                    return Ok(());
+                    return Ok(ChatResult { content, tool_calls });
                 }
             }
         }
     }
-    Ok(())
+    Ok(ChatResult { content, tool_calls })
 }
 
 // --- Control-plane exec allowlist ------------------------------------------
