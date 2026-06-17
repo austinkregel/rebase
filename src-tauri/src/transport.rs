@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tauri::{AppHandle, Emitter};
 
-use crate::connection::DialPlan;
+use rebase_core::connection::DialPlan;
 
 /// Tauri event names bridged to the webview. See docs/DIRECT-MODE.md "IPC contract".
 pub const EV_FRAME: &str = "cp://frame";
