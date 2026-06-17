@@ -14,12 +14,20 @@ export interface IndexingSettings {
   embedModel: string
   /** Chat model Crucible streams answers from (Ollama). */
   chatModel: string
+  /**
+   * Commands the Crucible AGENT (the LLM) may use via its `run_command` tool —
+   * an independent, narrower allowlist than the operator's exec allowlist, so
+   * the model can't even attempt commands it shouldn't. Prefix-matched; empty
+   * means the agent can run nothing. The agent's own exec allowlist still applies.
+   */
+  agentCommands: string[]
 }
 
 const defaultIndexing: IndexingSettings = {
   ollamaUrl: 'http://localhost:11434',
   embedModel: 'nomic-embed-text',
   chatModel: 'qwen2.5-coder',
+  agentCommands: ['git status', 'git diff', 'git log', 'ls', 'cat', 'rg', 'grep', 'go test', 'npm test', 'cargo test'],
 }
 
 export const useSettingsStore = defineStore('settings', {
