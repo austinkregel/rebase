@@ -157,18 +157,38 @@ async function verifyChecksum(
     throw new Error(`Crucible has no pinned checksum for ${asset} @ ${INDEXER_VERSION}`)
   }
   let got = ''
+  const failures: string[] = []
   for (const cmd of cmds) {
     const res = await fileService.exec(clientId, cmd, undefined, { timeoutSec: 120, timeoutMs: 125_000 })
     if (res.ok && res.code === 0) {
-      got = (res.stdout.trim().split(/\s+/)[0] ?? '').toLowerCase()
-      break
+      const out = (res.stdout.trim().split(/\s+/)[0] ?? '').toLowerCase()
+      if (out) {
+        got = out
+        break
+      }
     }
+    const tool = cmd.split(' ')[0]
+    const why =
+      res.code === 126
+        ? 'blocked by the exec allowlist'
+        : res.code === 127
+          ? 'not installed / not on PATH'
+          : (res.stderr || res.error || `exit ${res.code}`).trim()
+    failures.push(`${tool}: ${why}`)
+  }
+  if (!got) {
+    await fileService.delete(clientId, binPath).catch(() => {})
+    throw new Error(
+      `Couldn't verify the indexer — no usable checksum tool (${failures.join('; ')}). ` +
+        'Allow-list `sha256sum` (or `shasum -a 256`) on the agent, then retry. ' +
+        'Refusing to run an unverified binary.',
+    )
   }
   if (got !== expected) {
     await fileService.delete(clientId, binPath).catch(() => {})
     throw new Error(
-      `Indexer checksum mismatch for ${asset} (expected ${expected.slice(0, 12)}…, got ` +
-        `${got ? got.slice(0, 12) + '…' : 'no sha256 tool on agent'}). Refusing to run an unverified binary.`,
+      `Indexer checksum MISMATCH for ${asset} (expected ${expected.slice(0, 12)}…, got ${got.slice(0, 12)}…). ` +
+        'The downloaded binary does not match the pinned release — refusing to run it.',
     )
   }
 }
