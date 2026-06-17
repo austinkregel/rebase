@@ -62,11 +62,12 @@ function refresh() {
 
 <template>
   <span v-if="supported && project" class="flex items-center gap-1" :title="state?.error">
-    <SparklesIcon class="size-3.5" :class="busy ? 'animate-pulse text-accent' : 'text-subtle'" />
+    <SparklesIcon class="size-5" :class="busy ? 'animate-pulse text-accent' : 'text-subtle'" />
     <span :class="toneClass">{{ label }}</span>
     <IconButton
       :icon="ArrowPathIcon"
       variant="plain"
+      size="lg"
       label="rebuild Crucible index"
       :class="busy ? 'animate-spin text-accent' : ''"
       :disabled="busy"
