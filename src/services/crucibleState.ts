@@ -49,12 +49,32 @@ export interface ChatAction {
   run?: () => void | Promise<void>
 }
 
+export type ToolStatus = 'running' | 'awaiting' | 'done' | 'denied' | 'error'
+
+/** A tool the agent invoked in a turn — rendered live in the feed so the user
+ *  sees everything the agent does (read/search/run/edit). */
+export interface ToolInvocation {
+  id: string
+  /** Tool name (read_file, search_code, run_command, edit_file, …). */
+  name: string
+  /** One-line human summary shown on the card (e.g. "Read src/x.ts:1-40"). */
+  summary: string
+  status: ToolStatus
+  /** Captured stdout / result text (collapsible). */
+  output?: string
+  /** Unified diff for write/edit, shown before approval. */
+  diff?: string
+  error?: string
+}
+
 export interface ChatTurn {
   id: string
   role: ChatRole
   text: string
   citations?: Citation[]
   actions?: ChatAction[]
+  /** Tool invocations made in this assistant turn, in order. */
+  toolCalls?: ToolInvocation[]
   /** True while the assistant turn is still streaming. */
   streaming?: boolean
   error?: string
@@ -67,13 +87,25 @@ export interface ChatPin {
   clientId: string
 }
 
+/** Metadata for one persisted conversation (no turns — loaded on demand). */
+export interface ConversationMeta {
+  id: string
+  title: string
+  createdAt: number
+  lastMessageAt: number
+}
+
 const state = reactive({
   /** Index state keyed by project id. */
   index: {} as Record<string, IndexState>,
-  /** Chat transcript keyed by project id. */
+  /** Active conversation's turns, keyed by project id. */
   conversations: {} as Record<string, ChatTurn[]>,
   /** Pinned context files keyed by project id. */
   pins: {} as Record<string, ChatPin[]>,
+  /** All conversation metadata for a project (newest first), keyed by project id. */
+  conversationList: {} as Record<string, ConversationMeta[]>,
+  /** Which conversation is currently shown for a project, keyed by project id. */
+  activeConversationId: {} as Record<string, string>,
 })
 
 let seq = 0
@@ -111,6 +143,31 @@ export function updateTurn(projectId: string, id: string, patch: Partial<ChatTur
   if (turn) Object.assign(turn, patch)
 }
 
+/** Add a tool invocation card to an assistant turn; returns its id. */
+export function appendToolCall(
+  projectId: string,
+  turnId: string,
+  call: Omit<ToolInvocation, 'id'>,
+): string {
+  const turn = state.conversations[projectId]?.find((t) => t.id === turnId)
+  if (!turn) return ''
+  const inv: ToolInvocation = { ...call, id: nextId() }
+  ;(turn.toolCalls ??= []).push(inv)
+  return inv.id
+}
+
+/** Patch a tool invocation card (status/output/diff/error) in place. */
+export function updateToolCall(
+  projectId: string,
+  turnId: string,
+  callId: string,
+  patch: Partial<ToolInvocation>,
+): void {
+  const turn = state.conversations[projectId]?.find((t) => t.id === turnId)
+  const inv = turn?.toolCalls?.find((c) => c.id === callId)
+  if (inv) Object.assign(inv, patch)
+}
+
 /**
  * Record a security/operational note in the chat log so changes the app makes on
  * the user's behalf (e.g. auto-authorizing the indexer in the exec allowlist)
@@ -142,10 +199,28 @@ export function clearPins(projectId: string): void {
   state.pins[projectId] = []
 }
 
+export function conversationListFor(projectId: string): ConversationMeta[] {
+  return state.conversationList[projectId] ?? []
+}
+
+export function activeConversationIdFor(projectId: string): string | undefined {
+  return state.activeConversationId[projectId]
+}
+
+export function setConversationList(projectId: string, list: ConversationMeta[]): void {
+  state.conversationList[projectId] = list
+}
+
+export function setActiveConversationId(projectId: string, id: string): void {
+  state.activeConversationId[projectId] = id
+}
+
 /** Test/teardown helper. */
 export function _resetCrucibleState(): void {
   state.index = {}
   state.conversations = {}
   state.pins = {}
+  state.conversationList = {}
+  state.activeConversationId = {}
   seq = 0
 }
