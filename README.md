@@ -1,8 +1,7 @@
 # rebase
 
 A thin-client IDE for infrastructure you own. Browser PWA → control plane
-(`compute-agent-server`) → `compute-agent` on your machines. The Chromebook
-ideal, pointed at your own backend.
+(`compute-agent-server`) → `compute-agent` on your machines. 
 
 ## Stack
 
