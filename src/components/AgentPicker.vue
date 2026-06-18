@@ -68,7 +68,7 @@ const alertInfo = computed(() => (clientId: string) => {
     </SectionHeader>
 
     <!-- Search / filter -->
-    <div class="relative mx-3 mt-2 mb-1">
+    <div class="relative mx-3 mt-2 mb-2">
       <MagnifyingGlassIcon class="pointer-events-none absolute left-2 top-1/2 size-3 -translate-y-1/2 text-subtle" />
       <input
         v-model="search"
@@ -82,7 +82,7 @@ const alertInfo = computed(() => (clientId: string) => {
     </div>
 
     <!-- List container -->
-    <div class="flex-1 overflow-auto py-1">
+    <div class="flex-1 overflow-auto py-2">
       <!-- Empty states -->
       <p v-if="agents.agents.length === 0" class="mx-3 my-2 text-xs text-subtle">no servers online</p>
       <p v-else-if="filteredAgents.length === 0" class="mx-3 my-2 text-xs text-subtle">no matches</p>
@@ -91,7 +91,7 @@ const alertInfo = computed(() => (clientId: string) => {
       <button
         v-for="agent in filteredAgents"
         :key="agent.clientId"
-        class="flex w-full items-start gap-2 px-3 py-1 text-left text-muted hover:bg-hover"
+        class="flex w-full items-start gap-2 px-3 py-1.5 text-left text-muted hover:bg-hover"
         :class="{ 'bg-active text-fg': agent.clientId === session.activeClientId }"
         @click="pick(agent)"
         @contextmenu.prevent="serverMenu($event, agent)"
@@ -135,7 +135,7 @@ const alertInfo = computed(() => (clientId: string) => {
         <div
           v-for="s in agents.offlineSeenServers"
           :key="s.clientId"
-          class="flex items-start gap-2 px-3 py-1 opacity-50"
+          class="flex items-start gap-2 px-3 py-1.5 opacity-50"
         >
           <span class="mt-[3px] size-[10px] shrink-0 rounded-full bg-subtle" />
         <span class="flex min-w-0 flex-1 flex-col overflow-hidden">
