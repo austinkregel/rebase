@@ -8,6 +8,7 @@ import type { PublicClient } from '@/transport/types'
 import { openContextMenu } from '@/services/contextMenu'
 import { menuItemsFor } from '@/services/menus'
 import ServerTelemetry from './ServerTelemetry.vue'
+import SectionHeader from './ui/SectionHeader.vue'
 import IconButton from './ui/IconButton.vue'
 import Badge from './ui/Badge.vue'
 import Button from './ui/Button.vue'
@@ -54,15 +55,20 @@ const alertInfo = computed(() => (clientId: string) => {
 </script>
 
 <template>
-  <div class="border-b border-line pb-1.5">
-    <!-- Header row: server icon + plus button (replaces the duplicate "servers" label) -->
-    <header class="flex items-center justify-between border-b border-line px-2.5 py-1.5">
-      <ServerStackIcon class="size-4 text-subtle" />
-      <IconButton :icon="PlusIcon" variant="plain" label="link a new server" @click="addServerOpen = true" />
-    </header>
+  <div class="flex flex-col overflow-auto">
+    <!-- Header: matches SectionHeader styling for consistency with FILES tab -->
+    <SectionHeader>
+      <div class="flex items-center gap-2">
+        <ServerStackIcon class="size-4" />
+        <span>Servers</span>
+      </div>
+      <template #actions>
+        <IconButton :icon="PlusIcon" variant="plain" size="sm" label="link a new server" @click="addServerOpen = true" />
+      </template>
+    </SectionHeader>
 
     <!-- Search / filter -->
-    <div class="relative mx-2 mt-1.5 mb-0.5">
+    <div class="relative mx-3 mt-2 mb-1">
       <MagnifyingGlassIcon class="pointer-events-none absolute left-2 top-1/2 size-3 -translate-y-1/2 text-subtle" />
       <input
         v-model="search"
@@ -75,20 +81,22 @@ const alertInfo = computed(() => (clientId: string) => {
       </button>
     </div>
 
-    <!-- Empty states -->
-    <p v-if="agents.agents.length === 0" class="mx-3 my-2 text-xs text-subtle">no servers online</p>
-    <p v-else-if="filteredAgents.length === 0" class="mx-3 my-2 text-xs text-subtle">no matches</p>
+    <!-- List container -->
+    <div class="flex-1 overflow-auto py-1">
+      <!-- Empty states -->
+      <p v-if="agents.agents.length === 0" class="mx-3 my-2 text-xs text-subtle">no servers online</p>
+      <p v-else-if="filteredAgents.length === 0" class="mx-3 my-2 text-xs text-subtle">no matches</p>
 
-    <!-- Online agents (sorted, filtered) -->
-    <button
-      v-for="agent in filteredAgents"
-      :key="agent.clientId"
-      class="flex w-full items-start gap-2 px-3 py-1.5 text-left text-muted hover:bg-hover"
-      :class="{ 'bg-active text-fg': agent.clientId === session.activeClientId }"
-      @click="pick(agent)"
-      @contextmenu.prevent="serverMenu($event, agent)"
-    >
-      <span class="mt-[5px] size-[7px] shrink-0 rounded-full" :class="agent.authenticated ? 'bg-green' : 'bg-subtle'" />
+      <!-- Online agents (sorted, filtered) -->
+      <button
+        v-for="agent in filteredAgents"
+        :key="agent.clientId"
+        class="flex w-full items-start gap-2 px-3 py-1 text-left text-muted hover:bg-hover"
+        :class="{ 'bg-active text-fg': agent.clientId === session.activeClientId }"
+        @click="pick(agent)"
+        @contextmenu.prevent="serverMenu($event, agent)"
+      >
+        <span class="mt-[3px] size-[10px] shrink-0 rounded-full" :class="agent.authenticated ? 'bg-green' : 'bg-subtle'" />
       <span class="flex min-w-0 flex-1 flex-col overflow-hidden">
         <span class="flex items-center gap-1.5">
           <span class="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-fg">
@@ -117,19 +125,19 @@ const alertInfo = computed(() => (clientId: string) => {
       </span>
     </button>
 
-    <!-- Offline / historical servers (hidden while searching) -->
-    <template v-if="agents.offlineSeenServers.length && !search">
-      <div class="mx-3 my-1.5 flex items-center gap-2">
-        <div class="h-px flex-1 bg-line" />
-        <span class="text-[10px] uppercase tracking-[0.1em] text-subtle">offline</span>
-        <div class="h-px flex-1 bg-line" />
-      </div>
-      <div
-        v-for="s in agents.offlineSeenServers"
-        :key="s.clientId"
-        class="flex items-start gap-2 px-3 py-1 opacity-50"
-      >
-        <span class="mt-[5px] size-[7px] shrink-0 rounded-full bg-subtle" />
+      <!-- Offline / historical servers (hidden while searching) -->
+      <template v-if="agents.offlineSeenServers.length && !search">
+        <div class="mx-3 my-1.5 flex items-center gap-2">
+          <div class="h-px flex-1 bg-line" />
+          <span class="text-[10px] uppercase tracking-[0.1em] text-subtle">offline</span>
+          <div class="h-px flex-1 bg-line" />
+        </div>
+        <div
+          v-for="s in agents.offlineSeenServers"
+          :key="s.clientId"
+          class="flex items-start gap-2 px-3 py-1 opacity-50"
+        >
+          <span class="mt-[3px] size-[10px] shrink-0 rounded-full bg-subtle" />
         <span class="flex min-w-0 flex-1 flex-col overflow-hidden">
           <span class="flex items-center gap-1.5">
             <span class="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-muted">
@@ -146,7 +154,8 @@ const alertInfo = computed(() => (clientId: string) => {
           <span class="text-xs text-subtle">{{ s.platform }}/{{ s.arch }}</span>
         </span>
       </div>
-    </template>
+      </template>
+    </div>
   </div>
 
   <!-- Add Server modal -->
