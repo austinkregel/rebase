@@ -26,18 +26,8 @@ const agents = useAgentsStore()
 const toolTabs = computed(() => viewsFor('sidebar.tools'))
 
 // --- Hover flyouts for the collapsed sidebars ---
-const serversHover = ref(false)
 const toolsHover = ref(false)
-let serversHideTimer: ReturnType<typeof setTimeout> | null = null
 let toolsHideTimer: ReturnType<typeof setTimeout> | null = null
-
-function onServersEnter() {
-  if (serversHideTimer) { clearTimeout(serversHideTimer); serversHideTimer = null }
-  serversHover.value = true
-}
-function onServersLeave() {
-  serversHideTimer = setTimeout(() => { serversHover.value = false }, 100)
-}
 function onToolsEnter() {
   if (toolsHideTimer) { clearTimeout(toolsHideTimer); toolsHideTimer = null }
   toolsHover.value = true
@@ -256,13 +246,18 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
         </aside>
         <div class="w-[3px] shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent" @mousedown.prevent="startDrag('servers', $event)" />
       </template>
-      <!-- Collapsed servers: status dots + hover flyout -->
+      <!-- Collapsed servers: status dots at top, expand button pinned below -->
       <div
         v-else
         class="relative flex w-8 shrink-0 flex-col items-center gap-0.5 border-r border-line bg-surface py-1.5"
-        @mouseenter="onServersEnter"
-        @mouseleave="onServersLeave"
       >
+        <button
+          class="flex size-[26px] items-center justify-center text-subtle hover:text-fg"
+          title="expand servers"
+          @click="serversOpen = true"
+        >
+          <ChevronDoubleRightIcon class="size-3" />
+        </button>
         <button
           v-for="agent in agents.sortedAgents"
           :key="agent.clientId"
@@ -274,22 +269,6 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
           <span class="size-[7px] rounded-full" :class="agent.authenticated ? 'bg-green' : 'bg-subtle'" />
         </button>
         <div v-if="agents.sortedAgents.length === 0" class="size-[7px] rounded-full bg-subtle/30" />
-        <button
-          class="mt-auto flex size-[26px] items-center justify-center text-subtle hover:text-fg"
-          title="expand servers"
-          @click="serversOpen = true"
-        >
-          <ChevronDoubleRightIcon class="size-3" />
-        </button>
-        <!-- Flyout: full ServersColumn on hover -->
-        <div
-          v-show="serversHover"
-          class="absolute left-full top-0 z-50 w-56 max-h-[80vh] overflow-y-auto border-y border-r border-line bg-surface shadow-xl"
-          @mouseenter="onServersEnter"
-          @mouseleave="onServersLeave"
-        >
-          <ServersColumn />
-        </div>
       </div>
 
       <!-- Project -->
