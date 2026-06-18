@@ -2,19 +2,19 @@
 
 /* Design tokens → Tailwind utilities (bg-bg, text-fg, border-line, text-accent, …). */
 @theme {
-  --color-bg: #0d1117;
-  --color-surface: #10161d;
-  --color-elevated: #161d27;
-  --color-hover: #1a222d;
-  --color-active: #1f2937;
-  --color-line: #232b36;
-  --color-fg: #d4dae2;
-  --color-muted: #9aa6b2;
-  --color-subtle: #5e6a76;
-  --color-accent: #7aa2f7;
-  --color-green: #9ece6a;
-  --color-yellow: #e0af68;
-  --color-red: #f7768e;
+  --color-bg: #1e1e1e;
+  --color-surface: #262626;
+  --color-elevated: #2d2d2d;
+  --color-hover: #353535;
+  --color-active: #3e3e3e;
+  --color-line: #353535;
+  --color-fg: #e0e0e0;
+  --color-muted: #a3a3a3;
+  --color-subtle: #767676;
+  --color-accent: #F2778A;
+  --color-green: #87a03b;
+  --color-yellow: #f08501;
+  --color-red: #ff9200;
   --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
 
   /* Typography scale (4 steps; collapses the old 11 arbitrary text-[Npx] sizes).
@@ -33,19 +33,19 @@
 /* Legacy CSS variables (kept for scoped styles + the dockview theme during the
    migration to utility classes). Same values as the @theme tokens above. */
 :root {
-  --bg: #0d1117;
-  --bg-panel: #10161d;
-  --bg-input: #161d27;
-  --bg-hover: #1a222d;
-  --bg-active: #1f2937;
-  --border: #232b36;
-  --fg: #d4dae2;
-  --fg-muted: #9aa6b2;
-  --fg-subtle: #5e6a76;
-  --accent: #7aa2f7;
-  --green: #9ece6a;
-  --yellow: #e0af68;
-  --red: #f7768e;
+  --bg: #1e1e1e;
+  --bg-panel: #262626;
+  --bg-input: #2d2d2d;
+  --bg-hover: #353535;
+  --bg-active: #3e3e3e;
+  --border: #353535;
+  --fg: #e0e0e0;
+  --fg-muted: #a3a3a3;
+  --fg-subtle: #767676;
+  --accent: #F2778A;
+  --green: #87a03b;
+  --yellow: #f08501;
+  --red: #ff9200;
 
   color-scheme: dark;
 }

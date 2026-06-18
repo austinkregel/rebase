@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-// import { SomeIcon } from '@heroicons/vue/20/solid'
+// Swap this placeholder for your own Heroicon:
+import { PuzzlePieceIcon } from '@heroicons/vue/20/solid'
 import IconButton from '@/components/ui/IconButton.vue'
 import { runCommand } from '@/services/commands'
 
@@ -17,9 +18,10 @@ const label = computed(() => 'My Plugin')
 
 <template>
   <span class="flex items-center gap-1">
-    <!-- <SomeIcon class="size-5 text-subtle" /> -->
+    <PuzzlePieceIcon class="size-5 text-subtle" />
     <span>{{ label }}</span>
     <IconButton
+      :icon="PuzzlePieceIcon"
       variant="plain"
       size="lg"
       label="My action"

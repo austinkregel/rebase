@@ -29,10 +29,10 @@ export const themePresets: ThemePreset[] = [
     id: 'midnight',
     label: 'Midnight',
     palette: {
-      bg: '#0d1117', surface: '#10161d', elevated: '#161d27', hover: '#1a222d',
-      active: '#1f2937', line: '#232b36', fg: '#d4dae2', muted: '#9aa6b2',
-      subtle: '#5e6a76', accent: '#7aa2f7', green: '#9ece6a', yellow: '#e0af68',
-      red: '#f7768e',
+      bg: '#1e1e1e', surface: '#262626', elevated: '#2d2d2d', hover: '#353535',
+      active: '#3e3e3e', line: '#353535', fg: '#e0e0e0', muted: '#a3a3a3',
+      subtle: '#767676', accent: '#F2778A', green: '#87a03b', yellow: '#f08501',
+      red: '#ff9200',
     },
   },
   {
@@ -73,7 +73,7 @@ export const defaultAppearance: AppearanceSettings = {
 }
 
 /** Handy accent choices surfaced as swatches in the settings UI. */
-export const accentSwatches = ['#7aa2f7', '#9ece6a', '#e0af68', '#f7768e', '#bb9af7', '#2ac3de']
+export const accentSwatches = ['#F2778A', '#87a03b', '#f08501', '#ff9200', '#48BA7D', '#2d97de']
 
 // token → legacy `:root` variable (consumed by scoped styles + the dockview theme).
 const legacyVar: Record<ThemeToken, string> = {

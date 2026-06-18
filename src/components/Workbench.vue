@@ -3,6 +3,7 @@ import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowRe
 import { DockviewVue } from 'dockview-vue'
 import type { DockviewApi, DockviewReadyEvent, IDockviewPanel } from 'dockview-core'
 import { ChevronDoubleLeftIcon, ChevronDoubleRightIcon } from '@heroicons/vue/20/solid'
+import { CommandLineIcon, ServerIcon } from '@heroicons/vue/24/outline'
 import ServersColumn from './columns/ServersColumn.vue'
 import ProjectColumn from './columns/ProjectColumn.vue'
 import ToolsColumn from './columns/ToolsColumn.vue'
@@ -238,8 +239,11 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
       <!-- Servers (collapsible) -->
       <template v-if="serversOpen">
         <aside class="flex min-h-0 shrink-0 flex-col bg-surface" :style="{ width: `${widths.servers}px` }">
-          <div class="flex items-center justify-between border-b border-line py-1 pl-3 pr-2 text-xs uppercase tracking-[0.1em] text-subtle">
-            <span>servers</span>
+          <div class="flex items-center justify-between border-b border-line py-2.5 pl-3 pr-2 text-md uppercase tracking-widest text-subtle">
+            <span class="flex items-center gap-2">
+              <CommandLineIcon class="w-5 h-5 inline" />
+              Rebase
+            </span>
             <IconButton :icon="ChevronDoubleLeftIcon" variant="plain" label="collapse" @click="serversOpen = false" />
           </div>
           <ServersColumn />
@@ -258,6 +262,10 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
         >
           <ChevronDoubleRightIcon class="size-3" />
         </button>
+
+        <div class="my-3.5">
+          <ServerIcon class="w-4 h-4 text-subtle" />
+        </div>
         <button
           v-for="agent in agents.sortedAgents"
           :key="agent.clientId"
@@ -272,7 +280,7 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
       </div>
 
       <!-- Project -->
-      <aside class="flex min-h-0 shrink-0 flex-col bg-surface" :style="{ width: `${widths.project}px` }">
+      <aside class="flex min-h-0 shrink-0 flex-col" :style="{ width: `${widths.project}px` }">
         <ProjectColumn />
       </aside>
       <div class="w-[3px] shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent" @mousedown.prevent="startDrag('project', $event)" />

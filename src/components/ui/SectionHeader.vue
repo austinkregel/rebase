@@ -9,7 +9,7 @@ withDefaults(defineProps<{ bordered?: boolean }>(), { bordered: true })
     class="flex flex-shrink-0 items-center justify-between px-3 py-1.5"
     :class="bordered && 'border-b border-line'"
   >
-    <span class="overflow-hidden text-ellipsis whitespace-nowrap text-xs uppercase tracking-[0.12em] text-subtle">
+    <span class="overflow-hidden text-ellipsis whitespace-nowrap text-xs uppercase tracking-widest text-subtle">
       <slot />
     </span>
     <span v-if="$slots.actions" class="flex shrink-0 items-center gap-1">

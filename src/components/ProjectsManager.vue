@@ -12,6 +12,7 @@ import FileTreeItem from './FileTreeItem.vue'
 import SectionHeader from './ui/SectionHeader.vue'
 import Button from './ui/Button.vue'
 import InlineInput from './ui/InlineInput.vue'
+import IconButton from './ui/IconButton.vue'
 
 const projects = useProjectsStore()
 const session = useSessionStore()
@@ -165,14 +166,14 @@ function rootMenu(event: MouseEvent, p: Project, root: string) {
     <SectionHeader>
       projects
       <template #actions>
-        <Button
+        <IconButton
+          :icon="PlusIcon"
+          size="md"
+          label="new"
           variant="ghost"
           :disabled="!session.activeClientId"
-          title="save the current server as a project"
           @click="startNewProject"
-        >
-          <PlusIcon class="size-3.5" /> new
-        </Button>
+        />
       </template>
     </SectionHeader>
 

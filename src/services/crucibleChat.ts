@@ -174,6 +174,23 @@ function serializeTurn(t: ChatTurn): PersistedTurn {
   }
 }
 
+let historyToolSeq = 0
+
+/** Rehydrate a persisted turn into the shape appendTurn expects. Tool-call ids
+ *  are ephemeral (used only for live approval matching) and aren't persisted, so
+ *  we mint fresh ones for the v-for keys when replaying history. */
+function deserializeTurn(p: PersistedTurn): Omit<ChatTurn, 'id' | 'createdAt'> {
+  return {
+    role: p.role,
+    text: p.text,
+    ...(p.error ? { error: p.error } : {}),
+    ...(p.citations?.length ? { citations: p.citations } : {}),
+    ...(p.toolCalls?.length
+      ? { toolCalls: p.toolCalls.map((c) => ({ ...c, id: `hist-${++historyToolSeq}` })) }
+      : {}),
+  }
+}
+
 async function persistTurns(pid: string, turns: ChatTurn[]): Promise<void> {
   if (!isTauri() || !turns.length) return
   const lines = turns.filter((t) => !t.streaming).map((t) => JSON.stringify(serializeTurn(t)))
@@ -243,7 +260,7 @@ export async function activateConversation(pid: string, convId: string): Promise
     })
     for (const line of lines) {
       try {
-        appendTurn(pid, JSON.parse(line) as PersistedTurn)
+        appendTurn(pid, deserializeTurn(JSON.parse(line) as PersistedTurn))
       } catch {
         /* skip malformed line */
       }

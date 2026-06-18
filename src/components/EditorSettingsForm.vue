@@ -5,6 +5,8 @@ import { useSettingsStore } from '@/stores/settings'
 import type { EditorSettings } from '@/cm/setup'
 import { applyAppearance, themePresets, accentSwatches, clampScale } from '@/services/appearance'
 import SectionHeader from './ui/SectionHeader.vue'
+import IconButton from './ui/IconButton.vue'
+import { AdjustmentsHorizontalIcon } from '@heroicons/vue/20/solid'
 
 const settings = useSettingsStore()
 
@@ -37,7 +39,21 @@ function commitScale() {
 
 <template>
   <div class="flex h-full min-h-0 flex-col overflow-auto">
-    <SectionHeader>appearance</SectionHeader>
+    <SectionHeader>
+      appearance
+      <template #actions>
+        <div>
+        <IconButton
+          :icon="AdjustmentsHorizontalIcon"
+          size="md"
+          label="new"
+          variant="ghost"
+          :disabled="true"
+          @click="() => {}"
+        />
+        </div>
+      </template>
+    </SectionHeader>
     <div class="flex flex-col gap-3 p-3">
       <!-- UI scale -->
       <label class="flex flex-col gap-1.5">

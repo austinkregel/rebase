@@ -1,6 +1,7 @@
 import { markRaw } from 'vue'
 import { BeakerIcon } from '@heroicons/vue/20/solid'
 import { definePlugin } from '@/services/plugins'
+import type { FileMenuContext } from '@/services/menus'
 import { notify } from '@/services/notifications'
 import { counter, clockTime, eventLog, logEvent } from './state'
 import DemoStatus from './DemoStatus.vue'
@@ -104,7 +105,7 @@ export default definePlugin({
     // ── Context menu items ────────────────────────────────────────────────
     // Exercises: registerMenuItem with build(), FileMenuContext typing,
     // and two different menu IDs for the same logical action.
-    ctx.registerMenuItem({
+    ctx.registerMenuItem<FileMenuContext>({
       id: 'demo.logFilePath',
       menu: 'file/context',
       build(fileCtx) {
@@ -118,7 +119,7 @@ export default definePlugin({
       },
     })
 
-    ctx.registerMenuItem({
+    ctx.registerMenuItem<FileMenuContext>({
       id: 'demo.logFolderPath',
       menu: 'folder/context',
       build(fileCtx) {

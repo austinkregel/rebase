@@ -58,7 +58,7 @@ const alertInfo = computed(() => (clientId: string) => {
   <div class="flex flex-col overflow-auto">
     <!-- Header: matches SectionHeader styling for consistency with FILES tab -->
     <SectionHeader>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 my-0.5">
         <ServerStackIcon class="size-4" />
         <span>Servers</span>
       </div>
@@ -96,34 +96,38 @@ const alertInfo = computed(() => (clientId: string) => {
         @click="pick(agent)"
         @contextmenu.prevent="serverMenu($event, agent)"
       >
-        <span class="mt-[3px] size-[10px] shrink-0 rounded-full" :class="agent.authenticated ? 'bg-green' : 'bg-subtle'" />
-      <span class="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <span class="flex items-center gap-1.5">
-          <span class="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-fg">
-            {{ agent.hostname || agent.clientId }}
+        <span class="mt-[3px] size-2.5 shrink-0 rounded-full" :class="agent.authenticated ? 'bg-green' : 'bg-subtle'" />
+        <span class="flex min-w-0 flex-1 flex-col overflow-hidden gap-y-0.5">
+          <span class="flex items-center gap-1.5">
+            <span class="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-fg">
+              {{ agent.hostname || agent.clientId }}
+            </span>
+            <Badge
+              v-if="agent.directAddr"
+              tone="accent"
+              uppercase
+              class="ml-auto shrink-0"
+              :title="`direct connection available at ${agent.directAddr}${agent.directPinRequired ? ' (pinned cert)' : ''}`"
+            >P2P</Badge>
+            <Badge
+              v-if="alertInfo(agent.clientId)"
+              :tone="alertInfo(agent.clientId)!.critical ? 'danger' : 'warn'"
+              :class="agent.directAddr ? '' : 'ml-auto'"
+              class="shrink-0"
+              :title="`${alertInfo(agent.clientId)!.count} alert(s)`"
+            >
+              {{ alertInfo(agent.clientId)!.count }}
+            </Badge>
           </span>
-          <Badge
-            v-if="agent.directAddr"
-            tone="accent"
-            uppercase
-            class="ml-auto"
-            :title="`direct connection available at ${agent.directAddr}${agent.directPinRequired ? ' (pinned cert)' : ''}`"
-          >P2P</Badge>
-          <Badge
-            v-if="alertInfo(agent.clientId)"
-            :tone="alertInfo(agent.clientId)!.critical ? 'danger' : 'warn'"
-            :class="agent.directAddr ? '' : 'ml-auto'"
-            :title="`${alertInfo(agent.clientId)!.count} alert(s)`"
-          >
-            {{ alertInfo(agent.clientId)!.count }}
-          </Badge>
+          <span class="flex items-center gap-1.5 overflow-hidden">
+            <ServerTelemetry :client-id="agent.clientId" :metrics="['cpu', 'mem', 'disk']" class="min-w-0 flex-1" />
+          </span>
+          <span class="flex items-center gap-1.5 overflow-hidden">
+            <ServerTelemetry :client-id="agent.clientId" :show-thermal-only="true" class="min-w-0 flex-1" />
+            <span class="ml-auto shrink-0 text-2xs text-subtle tabular-nums">{{ rtt(agent) }}</span>
+          </span>
         </span>
-        <span class="overflow-hidden text-ellipsis whitespace-nowrap text-xs font-light text-fg">
-          {{ agent.platform }}/{{ agent.arch }} · {{ agent.agentVersion }} · {{ rtt(agent) }}
-        </span>
-        <ServerTelemetry :client-id="agent.clientId" />
-      </span>
-    </button>
+      </button>
 
       <!-- Offline / historical servers (hidden while searching) -->
       <template v-if="agents.offlineSeenServers.length && !search">
@@ -137,23 +141,21 @@ const alertInfo = computed(() => (clientId: string) => {
           :key="s.clientId"
           class="flex items-start gap-2 px-3 py-1.5 opacity-50"
         >
-          <span class="mt-[3px] size-[10px] shrink-0 rounded-full bg-subtle" />
-        <span class="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <span class="flex items-center gap-1.5">
-            <span class="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-muted">
-              {{ s.hostname || s.clientId }}
+          <span class="mt-[3px] size-2.5 shrink-0 rounded-full bg-subtle" />
+          <span class="flex min-w-0 flex-1 flex-col overflow-hidden gap-y-0.5">
+            <span class="flex items-center gap-1.5">
+              <span class="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-muted">
+                {{ s.hostname || s.clientId }}
+              </span>
+              <Badge
+                v-if="s.disconnectCount >= 3"
+                tone="warn"
+                class="ml-auto shrink-0"
+                :title="`disconnected ${s.disconnectCount} times — may be in a restart loop`"
+              >×{{ s.disconnectCount }}</Badge>
             </span>
-            <!-- Repeated disconnects indicate a death-loop -->
-            <Badge
-              v-if="s.disconnectCount >= 3"
-              tone="warn"
-              class="ml-auto shrink-0"
-              :title="`disconnected ${s.disconnectCount} times — may be in a restart loop`"
-            >×{{ s.disconnectCount }}</Badge>
           </span>
-          <span class="text-xs text-subtle">{{ s.platform }}/{{ s.arch }}</span>
-        </span>
-      </div>
+        </div>
       </template>
     </div>
   </div>

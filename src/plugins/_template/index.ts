@@ -9,8 +9,9 @@
 import { definePlugin } from '@/services/plugins'
 import { markRaw } from 'vue'
 import TemplateStatus from './TemplateStatus.vue'
-// Replace with real Heroicons:
-// import { SomeIcon } from '@heroicons/vue/20/solid'
+import type { FileMenuContext } from '@/services/menus'
+// Replace with real Heroicons (this generic one is just a placeholder):
+import { PuzzlePieceIcon } from '@heroicons/vue/20/solid'
 
 export default definePlugin({
   id: 'your-plugin-id',
@@ -68,10 +69,11 @@ export default definePlugin({
       id: 'your-plugin-id.panel',
       location: 'sidebar.tools',
       title: 'My Panel',
-      // icon: SomeOutlineIcon,
-      // iconActive: SomeSolidIcon,
+      // Swap these for your own outline/solid icon pair and panel component.
+      icon: PuzzlePieceIcon,
+      iconActive: PuzzlePieceIcon,
       order: 90,
-      // component: markRaw(MyPanelComponent),
+      component: markRaw(TemplateStatus),
     })
 
     // ── 6. Context menu item ─────────────────────────────────────────────────
@@ -79,7 +81,7 @@ export default definePlugin({
     //           'projectRoot/context' | 'server/context' |
     //           'editorTab/context' | 'terminal/context'
     // ctx type is inferred from the menu ID (FileMenuContext, etc.)
-    ctx.registerMenuItem({
+    ctx.registerMenuItem<FileMenuContext>({
       id: 'your-plugin-id.contextAction',
       menu: 'file/context',
       build(fileCtx) {
