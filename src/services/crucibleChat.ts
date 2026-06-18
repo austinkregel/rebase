@@ -179,34 +179,38 @@ async function persistTurns(pid: string, turns: ChatTurn[]): Promise<void> {
   const lines = turns.filter((t) => !t.streaming).map((t) => JSON.stringify(serializeTurn(t)))
   if (!lines.length) return
 
-  let convId = activeConversationIdFor(pid)
-  if (!convId) {
-    convId = crypto.randomUUID()
-    setActiveConversationId(pid, convId)
-  }
-  await invoke('transcript_append_to', { projectId: pid, conversationId: convId, lines })
+  try {
+    let convId = activeConversationIdFor(pid)
+    if (!convId) {
+      convId = crypto.randomUUID()
+      setActiveConversationId(pid, convId)
+    }
+    await invoke('transcript_append_to', { projectId: pid, conversationId: convId, lines })
 
-  // Update or insert this conversation's metadata.
-  const now = Date.now()
-  const firstUserText = turns.find((t) => t.role === 'user')?.text?.trim() ?? ''
-  const autoTitle = firstUserText.length > 0
-    ? firstUserText.slice(0, 60) + (firstUserText.length > 60 ? '…' : '')
-    : 'New conversation'
-  const list = conversationListFor(pid)
-  const existing = list.find((c) => c.id === convId)
-  let updated: ConversationMeta[]
-  if (existing) {
-    updated = list.map((c) =>
-      c.id === convId
-        ? { ...c, lastMessageAt: now, title: c.title === 'New conversation' ? autoTitle : c.title }
-        : c,
-    )
-  } else {
-    const newMeta: ConversationMeta = { id: convId, title: autoTitle, createdAt: now, lastMessageAt: now }
-    updated = [newMeta, ...list]
+    // Update or insert this conversation's metadata.
+    const now = Date.now()
+    const firstUserText = turns.find((t) => t.role === 'user')?.text?.trim() ?? ''
+    const autoTitle = firstUserText.length > 0
+      ? firstUserText.slice(0, 60) + (firstUserText.length > 60 ? '…' : '')
+      : 'New conversation'
+    const list = conversationListFor(pid)
+    const existing = list.find((c) => c.id === convId)
+    let updated: ConversationMeta[]
+    if (existing) {
+      updated = list.map((c) =>
+        c.id === convId
+          ? { ...c, lastMessageAt: now, title: c.title === 'New conversation' ? autoTitle : c.title }
+          : c,
+      )
+    } else {
+      const newMeta: ConversationMeta = { id: convId, title: autoTitle, createdAt: now, lastMessageAt: now }
+      updated = [newMeta, ...list]
+    }
+    setConversationList(pid, updated)
+    await invoke('transcript_save_meta', { projectId: pid, metaJson: JSON.stringify(updated) })
+  } catch (err) {
+    console.error('[Crucible] failed to persist conversation:', err)
   }
-  setConversationList(pid, updated)
-  await invoke('transcript_save_meta', { projectId: pid, metaJson: JSON.stringify(updated) })
 }
 
 /** Load this project's conversation list and activate the most recent one.
@@ -217,6 +221,7 @@ export async function loadConversations(pid: string): Promise<void> {
     const raw = await invoke<string>('transcript_list', { projectId: pid })
     const list: ConversationMeta[] = JSON.parse(raw)
     setConversationList(pid, list)
+    console.log(`[Crucible] loaded ${list.length} conversations for project ${pid}`)
     if (list.length > 0 && !activeConversationIdFor(pid) && turnsFor(pid).length === 0) {
       await activateConversation(pid, list[0].id)
     }
