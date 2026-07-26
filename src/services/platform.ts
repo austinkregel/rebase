@@ -43,6 +43,9 @@ export interface Platform {
   getExecAllowlist(controlPlane?: string): Promise<string[]>
   /** Replace the control plane's exec allowlist (it re-pushes to all agents). */
   setExecAllowlist(commands: string[], controlPlane?: string): Promise<void>
+  /** Atomically add commands to the allowlist (POST add op) without clobbering
+   *  concurrent edits or clearing the list; re-pushes the merged list to agents. */
+  addExecAllowlist(commands: string[], source?: string, controlPlane?: string): Promise<void>
 }
 
 class TauriPlatform implements Platform {
@@ -97,6 +100,14 @@ class TauriPlatform implements Platform {
 
   async setExecAllowlist(commands: string[], controlPlane?: string): Promise<void> {
     await invoke('exec_allowlist_set', { commands, controlPlane: controlPlane ?? null })
+  }
+
+  async addExecAllowlist(commands: string[], source?: string, controlPlane?: string): Promise<void> {
+    await invoke('exec_allowlist_add', {
+      commands,
+      source: source ?? null,
+      controlPlane: controlPlane ?? null,
+    })
   }
 }
 
@@ -157,6 +168,15 @@ class BrowserPlatform implements Platform {
       credentials: 'include',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ commands }),
+    })
+  }
+
+  async addExecAllowlist(commands: string[], source?: string): Promise<void> {
+    await fetch('/api/server/exec-allowlist', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ add: commands, source: source ?? 'crucible' }),
     })
   }
 }
