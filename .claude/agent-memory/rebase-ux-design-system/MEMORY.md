@@ -1,0 +1,5 @@
+- [User profile](user-profile.md) — owner of Re:Base IDE project, senior engineer, building IDE-grade UX on top of Vue + design system
+- [Design system primitives](design-system-primitives.md) — Button/IconButton/Badge/SectionHeader/InlineInput APIs and usage conventions
+- [Terminal overhaul spec](terminal-overhaul-spec.md) — approved UX spec for terminal polish + manager + context menus (2026-06-13)
+- [Terminal reconnect spec](terminal-reconnect-spec.md) — UX decisions for reconnect/resume, env/login-shell config, resilience affordances (2026-06-14)
+- [Crucible chat architecture](crucible-chat-architecture.md) — agent loop appends one turn per iteration; groupedTurns pattern + tool card conventions (2026-06-16)
