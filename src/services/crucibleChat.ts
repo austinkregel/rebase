@@ -6,6 +6,7 @@ import { notify } from '@/services/notifications'
 import { useSettingsStore } from '@/stores/settings'
 import type { Project } from '@/stores/projects'
 import { retrieve, type Hit } from '@/services/crucible'
+import { resolveNumCtx } from '@/services/session/modelLimits'
 import {
   appendTurn,
   appendToolCall,
@@ -57,12 +58,30 @@ export interface ChatMessage {
 export interface ChatStepResult {
   content: string
   toolCalls: unknown[]
+  /** Stopped mid-stream. `content` still holds whatever the user already saw. */
+  cancelled?: boolean
 }
 
 export interface StreamOptions {
   ollama: string
   model: string
   tools?: unknown[]
+  /** Sampling temperature; the pipeline sets this per role. */
+  temperature?: number
+  /**
+   * Context window to send as Ollama's `num_ctx`. Without it the server applies
+   * the modelfile's value (often 4096) and silently truncates, so any budgeting
+   * done up-stack is only real if the same window is sent here.
+   */
+  numCtx?: number
+  /** `'json'` constrains the reply to a single JSON object. */
+  format?: 'json'
+  /**
+   * Registers a canceller for this step. `stop()` calls it, which aborts the
+   * HTTP stream in Rust — without this, Stop only stopped *rendering* tokens
+   * while Ollama kept generating, so it appeared to take as long as the answer.
+   */
+  onCancel?: (cancel: () => void) => void
 }
 
 /** The backend behind one chat step. Streams content tokens + returns the final
@@ -84,14 +103,32 @@ class OllamaProvider implements ChatProvider {
   ): Promise<ChatStepResult> {
     const channel = new Channel<string>()
     channel.onmessage = (token) => onToken(token)
-    const res = await invoke<{ content: string; tool_calls: unknown[] }>('crucible_chat', {
-      ollama: opts.ollama,
-      model: opts.model,
-      messages,
-      tools: opts.tools ?? null,
-      onToken: channel,
+
+    const requestId = crypto.randomUUID()
+    opts.onCancel?.(() => {
+      // Fire-and-forget: an unknown or already-finished id is a no-op in Rust.
+      void invoke('crucible_chat_cancel', { requestId }).catch(() => {})
     })
-    return { content: res.content, toolCalls: res.tool_calls ?? [] }
+
+    const res = await invoke<{ content: string; tool_calls: unknown[]; cancelled: boolean }>(
+      'crucible_chat',
+      {
+        ollama: opts.ollama,
+        model: opts.model,
+        messages,
+        tools: opts.tools ?? null,
+        requestId,
+        temperature: opts.temperature ?? null,
+        numCtx: opts.numCtx ?? null,
+        format: opts.format ?? null,
+        onToken: channel,
+      },
+    )
+    return {
+      content: res.content,
+      toolCalls: res.tool_calls ?? [],
+      cancelled: res.cancelled === true,
+    }
   }
 }
 
@@ -300,8 +337,24 @@ let activeLoop: ActiveLoop | null = null
 const pendingApprovals = new Map<string, (d: ApprovalDecision) => void>()
 const sessionApproved = new Set<string>()
 
+/**
+ * Whether a run is in flight for this project.
+ *
+ * Deliberately NOT `&& !aborted`: `stop()` returns immediately, but `ask()` stays
+ * parked on its in-flight `provider.chat(...)` until the stream actually tears
+ * down. Reporting "idle" during that gap let a second `send()` start while the
+ * first run was still holding `beforeCount`, so both runs persisted overlapping
+ * slices of the transcript and the message landed on disk twice.
+ *
+ * Use `isStopping()` for the button label — the UI should still feel instant.
+ */
 export function isStreaming(projectId: string): boolean {
-  return !!activeLoop && activeLoop.projectId === projectId && !activeLoop.aborted
+  return !!activeLoop && activeLoop.projectId === projectId
+}
+
+/** A run that has been asked to stop but hasn't finished unwinding yet. */
+export function isStopping(projectId: string): boolean {
+  return !!activeLoop && activeLoop.projectId === projectId && activeLoop.aborted
 }
 
 /** Stop the agent: end the loop, cancel in-flight commands (kills them on the
@@ -364,6 +417,10 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
   const text = userText.trim()
   const root = project.rootPaths[0]
   if (!text || !root) return
+  // Never run two loops at once: the second would append turns inside the first's
+  // `beforeCount` window and both would persist overlapping slices. The UI also
+  // guards this, but the guard lives here because the invariant is this function's.
+  if (activeLoop) return
   const pid = project.id
   const { clientId } = project
 
@@ -379,9 +436,17 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
   const loop: ActiveLoop = { projectId: pid, aborted: false, cancels: new Set() }
   activeLoop = loop
 
-  const { ollamaUrl, chatModel, agentCommands } = useSettingsStore().indexing
+  const { ollamaUrl, chatModel, agentCommands, numCtxMax } = useSettingsStore().indexing
+  // Hoisted out of the try so the catch can mark the turn that was in flight.
+  let lastAssistantId = ''
 
   try {
+    // Inside the try: this awaits the network, and a throw out here would strand
+    // `activeLoop` non-null, which now (correctly) means "busy forever".
+    // Resolved once per user turn rather than per iteration — it's cached for a
+    // day and the model can't change mid-run.
+    const numCtx = await resolveNumCtx(ollamaUrl, chatModel, numCtxMax || undefined)
+
     let hits: Hit[] = []
     if (chatOptions.autoContext) {
       try {
@@ -410,7 +475,6 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
         : READ_ONLY_TOOL_SCHEMAS
 
     let consecutiveFailures = 0
-    let lastAssistantId = ''
 
     for (let iter = 0; iter < MAX_ITERS; iter++) {
       if (loop.aborted) break
@@ -418,18 +482,36 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
       const assistant = appendTurn(pid, { role: 'assistant', text: '', streaming: true })
       lastAssistantId = assistant.id
       let acc = ''
-      const { content, toolCalls } = await provider.chat(
+      const { content, toolCalls, cancelled } = await provider.chat(
         messages,
-        { ollama: ollamaUrl, model: chatModel, tools },
+        {
+          ollama: ollamaUrl,
+          model: chatModel,
+          tools,
+          numCtx,
+          // Registered in the same set as in-flight exec cancels, so `stop()`
+          // tears down the model stream and any running command together.
+          onCancel: (cancel) => loop.cancels.add(cancel),
+        },
         (tok) => {
           if (loop.aborted) return
           acc += tok
           updateTurn(pid, assistant.id, { text: acc })
         },
       )
-      updateTurn(pid, assistant.id, { streaming: false, text: content || acc })
+      // On a cancel, keep what the user actually read (`acc`) rather than the
+      // fuller `content` Rust accumulated — tokens kept arriving between the
+      // Stop and the stream tearing down, and showing them would grow the bubble
+      // *after* the user stopped it.
+      updateTurn(pid, assistant.id, {
+        streaming: false,
+        text: cancelled ? acc : content || acc,
+      })
 
-      if (loop.aborted || !toolCalls.length) break
+      // `cancelled` is not redundant with `aborted`: a cancel that didn't come
+      // from `stop()` (a timeout, or a phase abort once the pipeline lands) would
+      // otherwise fall through as "the model finished normally".
+      if (loop.aborted || cancelled || !toolCalls.length) break
 
       // Record the model's tool-calling turn, then run each tool.
       messages.push({ role: 'assistant', content, tool_calls: toolCalls })
@@ -500,11 +582,19 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
       updateTurn(pid, lastAssistantId, { citations: hits.map(toCitation) })
     }
     if (loop.aborted) appendSystemNote(pid, '⏹ Stopped by you.')
-    await persistTurns(pid, turnsFor(pid).slice(beforeCount))
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    // Land the failure on the turn itself, not only in a toast. Without this the
+    // bubble keeps `streaming: true` forever — a blinking cursor over empty text
+    // — which is exactly what a user sees today when the chat model isn't pulled,
+    // even though the Rust side formats a perfectly good "run `ollama pull X`".
+    if (lastAssistantId) updateTurn(pid, lastAssistantId, { streaming: false, error: msg })
     notify.error('Crucible chat failed', { source: 'Crucible', body: msg })
   } finally {
+    // Persist in `finally`: a failed turn is still part of the conversation, and
+    // losing the user's own message because the model errored is worse than the
+    // error. (`persistTurns` skips still-streaming turns, hence the reset above.)
+    await persistTurns(pid, turnsFor(pid).slice(beforeCount))
     if (activeLoop === loop) activeLoop = null
   }
 }
