@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { Switch } from '@headlessui/vue'
 import { useSettingsStore } from '@/stores/settings'
+import type { ModelRole } from '@/services/agent/types'
 import type { EditorSettings } from '@/cm/setup'
 import { applyAppearance, themePresets, accentSwatches, clampScale } from '@/services/appearance'
 import SectionHeader from './ui/SectionHeader.vue'
@@ -19,6 +20,14 @@ const toggles: { key: keyof EditorSettings; label: string }[] = [
   { key: 'closeBrackets', label: 'Auto-close brackets' },
   { key: 'autocomplete', label: 'Autocompletion' },
   { key: 'indentWithTabs', label: 'Indent with tabs' },
+]
+
+// Pipeline order, so the list reads as the run does.
+const ROLES: { role: ModelRole; label: string }[] = [
+  { role: 'planner', label: 'Planner model' },
+  { role: 'validator', label: 'Validator model' },
+  { role: 'executor', label: 'Executor model' },
+  { role: 'postValidator', label: 'Reviewer model' },
 ]
 
 // Applying the UI scale sets CSS `zoom` on <html>, which reflows the whole app —
@@ -188,6 +197,24 @@ function commitScale() {
         />
       </label>
 
+      <label class="flex items-center justify-between gap-3">
+        <span class="text-sm text-fg">Max context window</span>
+        <input
+          type="number"
+          min="0"
+          step="1024"
+          :value="settings.indexing.numCtxMax"
+          class="w-24 rounded border border-line bg-elevated px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+          placeholder="16384"
+          @change="settings.updateIndexing({ numCtxMax: Number(($event.target as HTMLInputElement).value) })"
+        />
+      </label>
+      <span class="-mt-1.5 text-2xs text-subtle">
+        Tokens of context to request, at most. Ollama sizes its KV cache from this, so a large
+        value can push the model off the GPU. 0 uses the built-in cap; a model's own
+        <code>num_ctx</code> always wins.
+      </span>
+
       <label class="flex flex-col gap-1.5">
         <span class="text-sm text-fg">Agent commands</span>
         <span class="text-2xs text-subtle">
@@ -203,6 +230,77 @@ function commitScale() {
           @change="settings.updateIndexing({ agentCommands: ($event.target as HTMLTextAreaElement).value.split('\n').map((s) => s.trim()).filter(Boolean) })"
         />
       </label>
+    </div>
+
+    <SectionHeader>crucible agent</SectionHeader>
+    <div class="flex flex-col gap-3 p-3">
+      <span class="text-2xs text-subtle">
+        Settings for the multi-phase plan and build modes, which are still being built —
+        they have no effect on the chat modes available today. Each phase runs on its own
+        model; leave a field empty to use the chat model.
+      </span>
+
+      <label v-for="r in ROLES" :key="r.role" class="flex items-center justify-between gap-3">
+        <span class="text-sm text-fg">{{ r.label }}</span>
+        <input
+          :value="settings.agent.roleModels[r.role]"
+          class="w-44 rounded border border-line bg-elevated px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+          :placeholder="settings.indexing.chatModel"
+          spellcheck="false"
+          autocomplete="off"
+          @change="settings.updateAgent({ roleModels: { [r.role]: ($event.target as HTMLInputElement).value.trim() } })"
+        />
+      </label>
+
+      <label class="flex items-center justify-between gap-3">
+        <span class="text-sm text-fg">Confidence threshold</span>
+        <span class="flex items-center gap-2">
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            :value="settings.agent.adversarial.confidenceThreshold"
+            class="w-28 accent-accent"
+            @change="settings.updateAgent({ adversarial: { confidenceThreshold: Number(($event.target as HTMLInputElement).value) } })"
+          />
+          <span class="w-9 text-right text-sm tabular-nums text-subtle">
+            {{ Math.round(settings.agent.adversarial.confidenceThreshold * 100) }}%
+          </span>
+        </span>
+      </label>
+
+      <label class="flex items-center justify-between gap-3">
+        <span class="text-sm text-fg">Max plan revisions</span>
+        <input
+          type="number"
+          min="1"
+          max="5"
+          :value="settings.agent.adversarial.maxIterations"
+          class="w-16 rounded border border-line bg-elevated px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+          @change="settings.updateAgent({ adversarial: { maxIterations: Number(($event.target as HTMLInputElement).value) } })"
+        />
+      </label>
+
+      <div class="flex items-center justify-between gap-3">
+        <span class="text-sm text-fg">Review after execution</span>
+        <Switch
+          :model-value="settings.agent.adversarial.postValidation"
+          class="relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors"
+          :class="settings.agent.adversarial.postValidation ? 'bg-accent' : 'bg-line'"
+          @update:model-value="settings.updateAgent({ adversarial: { postValidation: $event } })"
+        >
+          <span
+            class="inline-block size-3 transform rounded-full bg-bg transition-transform"
+            :class="settings.agent.adversarial.postValidation ? 'translate-x-3.5' : 'translate-x-0.5'"
+          />
+        </Switch>
+      </div>
+
+      <span class="text-2xs text-subtle">
+        A higher threshold will mean more validate-and-revise rounds before the agent is
+        allowed to touch files.
+      </span>
     </div>
   </div>
 </template>
