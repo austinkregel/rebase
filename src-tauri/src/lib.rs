@@ -1,5 +1,7 @@
+mod cache;
 mod codesearch;
 mod crucible;
+mod ollama;
 mod transport;
 
 use std::sync::Arc;
@@ -213,6 +215,7 @@ pub fn run() {
             let oidc = AppConfig::load().ok().and_then(|c| c.oidc);
             app.manage(Arc::new(Auth::new(oidc)));
             app.manage(Arc::new(Transport::new()));
+            app.manage(Arc::new(crucible::ChatCancels::default()));
 
             #[cfg(desktop)]
             {
@@ -242,8 +245,15 @@ pub fn run() {
             crucible::crucible_index_exists,
             crucible::crucible_extract_index,
             crucible::crucible_chat,
+            crucible::crucible_chat_cancel,
+            ollama::ollama_model_info,
+            cache::cache_get,
+            cache::cache_set,
+            cache::cache_invalidate,
+            cache::cache_invalidate_namespace,
             crucible::exec_allowlist_get,
             crucible::exec_allowlist_set,
+            crucible::exec_allowlist_add,
             crucible::transcript_list,
             crucible::transcript_load_conversation,
             crucible::transcript_append_to,
