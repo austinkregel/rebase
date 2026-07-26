@@ -1,9 +1,10 @@
 name: Release
 
 # Tagging v1.2.3 builds the desktop app on every platform and attaches the
-# bundles to a draft GitHub release. The version in the tag must match the
-# version in package.json / tauri.conf.json / the Cargo manifests — the verify
-# job enforces that, because those five files drift easily.
+# bundles to a draft GitHub release. The tag is the only source of truth for the
+# version: scripts/set-version.sh stamps it into package.json, tauri.conf.json
+# and the Cargo manifests at build time, so releasing never requires a commit
+# that bumps those five files.
 on:
   push:
     tags: ['v*.*.*']
@@ -18,34 +19,22 @@ permissions:
 
 jobs:
   verify:
-    name: Verify version + tests
+    name: Verify tests
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Check version matches the tag
-        run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          want="${tag#v}"
-          fail=0
-          check() {
-            if [ "$2" != "$want" ]; then
-              echo "::error file=$1::version is '$2', tag says '$want'"
-              fail=1
-            fi
-          }
-          check package.json              "$(jq -r .version package.json)"
-          check src-tauri/tauri.conf.json "$(jq -r .version src-tauri/tauri.conf.json)"
-          for manifest in src-tauri/Cargo.toml rebase-core/Cargo.toml rebase-cli/Cargo.toml; do
-            check "$manifest" "$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$manifest" | head -1)"
-          done
-          exit $fail
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+
+      # After npm ci — stamping package.json first would leave it out of step
+      # with package-lock.json, which npm ci refuses to reconcile.
+      - name: Stamp the tag's version into the manifests
+        run: bash scripts/set-version.sh "${{ github.event.inputs.tag || github.ref_name }}"
+
       - run: npm run typecheck
       - run: npm test
 
@@ -108,6 +97,13 @@ jobs:
           # LanceDB pulls in DataFusion and the AWS SDK; a cold build is long
           # enough that per-platform cache keys are worth it.
           key: ${{ matrix.runner }}
+
+      # After npm ci and the cargo cache, both of which want the manifests as
+      # committed; before tauri-action, which reads the version it stamps into
+      # every bundle.
+      - name: Stamp the tag's version into the manifests
+        shell: bash
+        run: bash scripts/set-version.sh "${{ github.event.inputs.tag || github.ref_name }}"
 
       - uses: tauri-apps/tauri-action@v1
         env:
