@@ -2,13 +2,15 @@
 //! the local index cache (extracting the archive the agent produced), serves the
 //! bundled indexer binary for upload, and edits the control-plane exec allowlist.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tauri::{ipc::Channel, State};
+use tokio::sync::oneshot;
 
 use rebase_core::config::AppConfig;
 use rebase_core::oidc::Auth;
@@ -251,23 +253,201 @@ pub struct ChatMessage {
 }
 
 /// The assistant's reply: streamed `content` (also pushed live over the channel)
-/// plus any `tool_calls` the model wants the app to execute.
+/// plus any `tool_calls` the model wants the app to execute. A cancelled step
+/// still returns whatever streamed before the stop — the user already read those
+/// tokens, so throwing them away would rewrite the transcript under them.
 #[derive(serde::Serialize)]
 pub struct ChatResult {
     pub content: String,
     pub tool_calls: Vec<serde_json::Value>,
+    pub cancelled: bool,
+}
+
+/// In-flight `crucible_chat` calls, keyed by the caller's `requestId`.
+///
+/// Without this, stopping the agent only flipped a flag in the webview: the HTTP
+/// body kept streaming and Ollama kept generating, so Stop took as long as the
+/// answer did. Firing the sender breaks the read loop and drops the response,
+/// which closes the connection and actually halts generation server-side.
+#[derive(Default)]
+pub struct ChatCancels {
+    live: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    /// Ids cancelled before they were ever armed.
+    ///
+    /// `invoke` preserves IPC *delivery* order but not *execution* order: an
+    /// async command is spawned onto the runtime and doesn't run `register`
+    /// until first polled, while `crucible_chat_cancel` is sync and runs
+    /// straight away. A cancel landing in that gap would otherwise find an
+    /// empty map, no-op, and leave a stream nobody can ever stop — the exact
+    /// bug this registry exists to prevent, reappearing silently.
+    precancelled: Mutex<HashSet<String>>,
+}
+
+impl ChatCancels {
+    /// Arm cancellation for `id`, returning a receiver that is *already* resolved
+    /// if a cancel arrived first. A repeat id drops the previous sender, whose
+    /// receiver then resolves immediately — the right outcome for a duplicate.
+    fn register(&self, id: &str) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        if self.precancelled.lock().unwrap().remove(id) {
+            // Fire immediately; the loop will break on its first poll.
+            let _ = tx.send(());
+            return rx;
+        }
+        self.live.lock().unwrap().insert(id.to_string(), tx);
+        rx
+    }
+
+    /// Fire the cancel for `id`. Records the id as pre-cancelled when nothing is
+    /// armed yet, so a `register` that has not run cannot miss it.
+    fn cancel(&self, id: &str) {
+        match self.live.lock().unwrap().remove(id) {
+            Some(tx) => {
+                let _ = tx.send(());
+            }
+            None => {
+                self.precancelled.lock().unwrap().insert(id.to_string());
+            }
+        }
+    }
+
+    /// Drop any armed sender for `id` without firing it (the request finished).
+    fn forget(&self, id: &str) {
+        self.live.lock().unwrap().remove(id);
+        self.precancelled.lock().unwrap().remove(id);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.live.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    fn precancelled_len(&self) -> usize {
+        self.precancelled.lock().unwrap().len()
+    }
+}
+
+/// Removes the registry entry however the chat exits — success, error, or cancel.
+/// Without it the map grows one dead sender per completed request.
+struct CancelGuard {
+    cancels: Arc<ChatCancels>,
+    id: String,
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.cancels.forget(&self.id);
+    }
+}
+
+/// Stop an in-flight `crucible_chat`. Safe to call for an id that has finished,
+/// was never issued, or has not been armed yet (see `ChatCancels::precancelled`).
+#[tauri::command]
+pub fn crucible_chat_cancel(request_id: String, cancels: State<'_, Arc<ChatCancels>>) {
+    cancels.cancel(&request_id);
+}
+
+/// Consume Ollama's NDJSON response into a `ChatResult`, forwarding content
+/// tokens as they arrive and stopping early if `cancel_rx` fires.
+///
+/// Generic over the byte stream and the token sink so it can be driven from a
+/// test without a live server: the command passes a reqwest stream and a Tauri
+/// channel, tests pass `stream::iter` and a closure. This is the part of the
+/// chat path most worth pinning — the framing, and the cancellation semantics
+/// that decide whether Stop actually stops.
+async fn drain_ndjson<S, B, E>(
+    mut stream: S,
+    mut cancel_rx: Option<oneshot::Receiver<()>>,
+    mut on_token: impl FnMut(&str),
+) -> Result<ChatResult, String>
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let mut buf: Vec<u8> = Vec::new();
+    let mut content = String::new();
+    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+    let mut cancelled = false;
+
+    loop {
+        // `biased` so the cancel is checked first and Stop takes effect on the
+        // very next chunk boundary. Without it `select!` picks at random among
+        // ready branches, which would make cancellation land probabilistically.
+        let next = match cancel_rx.as_mut() {
+            Some(rx) => tokio::select! {
+                biased;
+                _ = &mut *rx => { cancelled = true; break }
+                chunk = stream.next() => chunk,
+            },
+            None => stream.next().await,
+        };
+        let Some(chunk) = next else { break };
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        buf.extend_from_slice(chunk.as_ref());
+
+        // Frames can split mid-line, so only complete lines are parsed and the
+        // remainder stays buffered for the next chunk.
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            let line = &line[..line.len() - 1];
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
+                if let Some(msg) = v.get("message") {
+                    if let Some(tok) = msg.get("content").and_then(|c| c.as_str()) {
+                        if !tok.is_empty() {
+                            content.push_str(tok);
+                            on_token(tok);
+                        }
+                    }
+                    if let Some(tc) = msg.get("tool_calls").and_then(|c| c.as_array()) {
+                        tool_calls.extend(tc.iter().cloned());
+                    }
+                }
+                if v.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
+                    return Ok(ChatResult {
+                        content,
+                        tool_calls,
+                        cancelled: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // Fell out of the loop: either cancelled, or the stream ended without a
+    // `done` frame. Both keep the partial content.
+    Ok(ChatResult {
+        content,
+        tool_calls,
+        cancelled,
+    })
 }
 
 /// One chat step against Ollama. Forwards content tokens over the channel as they
 /// stream, and returns the final assistant message (content + tool_calls). When
 /// `tools` is provided, the model may return tool_calls instead of (or with) text.
+///
+/// `num_ctx` matters more than it looks: without it Ollama uses the *modelfile's*
+/// context window (commonly 4096) whatever the model actually supports, and
+/// silently drops the oldest tokens — so any budgeting we do up-stack is fiction
+/// unless the window we budgeted against is the one we sent.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn crucible_chat(
     ollama: String,
     model: String,
     messages: Vec<ChatMessage>,
     tools: Option<serde_json::Value>,
+    request_id: Option<String>,
+    temperature: Option<f32>,
+    num_ctx: Option<u32>,
+    format: Option<String>,
     on_token: Channel<String>,
+    cancels: State<'_, Arc<ChatCancels>>,
 ) -> Result<ChatResult, String> {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
@@ -289,14 +469,59 @@ pub async fn crucible_chat(
     if let Some(t) = tools {
         body["tools"] = t;
     }
+    // `format: "json"` constrains the model to emit a single JSON object, which is
+    // what the planner/validator/post-validator roles want. It removes most of the
+    // "model wrapped its JSON in prose" parse failures at the source.
+    if let Some(f) = format {
+        body["format"] = serde_json::json!(f);
+    }
+    let mut options = serde_json::Map::new();
+    if let Some(t) = temperature {
+        options.insert("temperature".into(), serde_json::json!(t));
+    }
+    if let Some(n) = num_ctx {
+        options.insert("num_ctx".into(), serde_json::json!(n));
+    }
+    if !options.is_empty() {
+        body["options"] = serde_json::Value::Object(options);
+    }
+
+    // Arm cancellation before the request goes out, so a Stop that lands during
+    // connect/headers is honoured rather than deferred.
+    let mut cancel_rx = request_id.as_deref().map(|id| cancels.register(id));
+    let _guard = request_id.as_deref().map(|id| CancelGuard {
+        cancels: Arc::clone(&cancels),
+        id: id.to_string(),
+    });
 
     let url = format!("{}/api/chat", ollama.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("POST {url} (is Ollama running?): {e}"))?;
+    // No overall timeout: a long generation is normal and cancellation is the
+    // right control for it. `connect_timeout` still bounds an unreachable host,
+    // which would otherwise hang the turn with no feedback.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let request = client.post(&url).json(&body).send();
+
+    // Ollama doesn't flush response headers until the model is resident, so on a
+    // cold large model this await alone can be 20-60s. Racing the cancel here is
+    // what makes Stop land *during* the load rather than after it.
+    let sent = match cancel_rx.as_mut() {
+        Some(rx) => tokio::select! {
+            biased;
+            _ = &mut *rx => {
+                return Ok(ChatResult {
+                    content: String::new(),
+                    tool_calls: Vec::new(),
+                    cancelled: true,
+                })
+            }
+            r = request => r,
+        },
+        None => request.await,
+    };
+    let resp = sent.map_err(|e| format!("POST {url} (is Ollama running?): {e}"))?;
     let status = resp.status();
     if !status.is_success() {
         // Ollama returns 404 with `{"error":"model '…' not found"}` when the chat
@@ -311,38 +536,10 @@ pub async fn crucible_chat(
         return Err(format!("Ollama chat {status}: {detail}"));
     }
 
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut content = String::new();
-    let mut tool_calls: Vec<serde_json::Value> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        buf.extend_from_slice(&chunk);
-        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buf.drain(..=pos).collect();
-            let line = &line[..line.len() - 1];
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
-                if let Some(msg) = v.get("message") {
-                    if let Some(tok) = msg.get("content").and_then(|c| c.as_str()) {
-                        if !tok.is_empty() {
-                            content.push_str(tok);
-                            let _ = on_token.send(tok.to_string());
-                        }
-                    }
-                    if let Some(tc) = msg.get("tool_calls").and_then(|c| c.as_array()) {
-                        tool_calls.extend(tc.iter().cloned());
-                    }
-                }
-                if v.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
-                    return Ok(ChatResult { content, tool_calls });
-                }
-            }
-        }
-    }
-    Ok(ChatResult { content, tool_calls })
+    drain_ndjson(resp.bytes_stream(), cancel_rx, |tok| {
+        let _ = on_token.send(tok.to_string());
+    })
+    .await
 }
 
 // --- Control-plane exec allowlist ------------------------------------------
@@ -418,9 +615,39 @@ pub async fn exec_allowlist_set(
     Ok(())
 }
 
+/// Atomically add commands to the control plane's exec allowlist (POST add op),
+/// which re-pushes the merged list to every connected agent. Unlike a full PUT
+/// replace, this never clears the list and won't clobber concurrent admin edits
+/// — the right primitive for Crucible's auto-grant.
+#[tauri::command]
+pub async fn exec_allowlist_add(
+    auth: State<'_, Arc<Auth>>,
+    control_plane: Option<String>,
+    commands: Vec<String>,
+    source: Option<String>,
+) -> Result<(), String> {
+    let base = cp_http_base(control_plane)?;
+    let bearer = auth
+        .bearer()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("not signed in")?;
+    reqwest::Client::new()
+        .post(format!("{base}/api/server/exec-allowlist"))
+        .bearer_auth(bearer)
+        .json(&serde_json::json!({ "add": commands, "source": source.unwrap_or_else(|| "crucible".into()) }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::oneshot::error::TryRecvError;
 
     #[test]
     fn within_allows_nested_and_rejects_escape() {
@@ -460,5 +687,188 @@ mod tests {
         assert!(out.join("sub").join("data.lance").exists());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn cancel_registry_fires_the_armed_receiver() {
+        let cancels = ChatCancels::default();
+        let mut rx = cancels.register("req-1");
+        assert_eq!(cancels.len(), 1);
+
+        // Pending, specifically — not merely "not yet a value". `is_err()` alone
+        // would also pass for a closed channel, which is the opposite state.
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+        cancels.cancel("req-1");
+        assert_eq!(rx.try_recv(), Ok(()));
+        assert_eq!(cancels.len(), 0, "cancel must remove the entry");
+    }
+
+    #[test]
+    fn cancelling_a_finished_request_is_a_no_op() {
+        let cancels = ChatCancels::default();
+        let rx = cancels.register("req-1");
+        cancels.forget("req-1"); // the chat completed
+        drop(rx);
+
+        cancels.cancel("req-1");
+        // The id was live and is now gone, so this must not be recorded as an
+        // early cancel — a later request reusing the id would die instantly.
+        assert_eq!(cancels.len(), 0);
+        assert_eq!(cancels.precancelled_len(), 1);
+        cancels.forget("req-1");
+        assert_eq!(cancels.precancelled_len(), 0);
+    }
+
+    #[test]
+    fn a_cancel_that_arrives_before_registration_is_not_lost() {
+        // `invoke` preserves delivery order but not execution order: the sync
+        // cancel command can run before the spawned async chat polls far enough
+        // to arm itself. The receiver must come back already fired.
+        let cancels = ChatCancels::default();
+        cancels.cancel("req-1");
+        assert_eq!(cancels.precancelled_len(), 1);
+
+        let mut rx = cancels.register("req-1");
+        assert_eq!(rx.try_recv(), Ok(()), "must resolve immediately");
+        assert_eq!(cancels.precancelled_len(), 0, "the marker is consumed once");
+        assert_eq!(cancels.len(), 0, "a pre-cancelled id is never armed");
+    }
+
+    #[test]
+    fn a_pre_cancel_applies_only_to_the_next_registration() {
+        let cancels = ChatCancels::default();
+        cancels.cancel("req-1");
+        let _consumed = cancels.register("req-1");
+
+        // A second run reusing the id must start clean.
+        let mut second = cancels.register("req-1");
+        assert_eq!(second.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    /// Feed `chunks` through the drain loop, optionally cancelling first.
+    async fn drain(
+        chunks: Vec<&'static str>,
+        cancel: Option<oneshot::Receiver<()>>,
+    ) -> (ChatResult, Vec<String>) {
+        let stream = futures_util::stream::iter(
+            chunks
+                .into_iter()
+                .map(|c| Ok::<_, std::io::Error>(c.as_bytes().to_vec())),
+        );
+        let mut tokens = Vec::new();
+        let result = drain_ndjson(stream, cancel, |t| tokens.push(t.to_string()))
+            .await
+            .unwrap();
+        (result, tokens)
+    }
+
+    #[tokio::test]
+    async fn a_done_frame_ends_the_stream_as_not_cancelled() {
+        let (result, tokens) = drain(
+            vec![
+                r#"{"message":{"content":"Hel"}}"#,
+                "\n",
+                r#"{"message":{"content":"lo"}}"#,
+                "\n",
+                r#"{"done":true}"#,
+                "\n",
+            ],
+            None,
+        )
+        .await;
+
+        assert_eq!(result.content, "Hello");
+        assert!(!result.cancelled);
+        assert_eq!(tokens, vec!["Hel", "lo"], "each token forwarded as it arrives");
+    }
+
+    #[tokio::test]
+    async fn a_frame_split_across_chunks_is_reassembled() {
+        // The framing bug that would be invisible without a test: a JSON object
+        // arriving in three pieces must parse once, not zero or three times.
+        let (result, _) = drain(
+            vec![r#"{"message":{"cont"#, r#"ent":"split"}}"#, "\n", r#"{"done":true}"#, "\n"],
+            None,
+        )
+        .await;
+        assert_eq!(result.content, "split");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_stops_the_loop_and_keeps_what_arrived() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(()).unwrap();
+
+        // Already-fired cancel: `biased` must pick it over the ready chunks, so
+        // nothing is consumed at all.
+        let (result, tokens) = drain(vec![r#"{"message":{"content":"never"}}"#, "\n"], Some(rx)).await;
+
+        assert!(result.cancelled);
+        assert_eq!(result.content, "", "cancel wins over an already-buffered chunk");
+        assert!(tokens.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_ends_without_done_keeps_its_partial_content() {
+        // A dropped connection mid-answer. The partial reply is what the user
+        // already read, so it must survive rather than being discarded.
+        let (result, _) = drain(vec![r#"{"message":{"content":"partial"}}"#, "\n"], None).await;
+        assert_eq!(result.content, "partial");
+        assert!(!result.cancelled, "an ended stream is not a cancellation");
+    }
+
+    #[tokio::test]
+    async fn tool_calls_accumulate_across_frames() {
+        let (result, _) = drain(
+            vec![
+                r#"{"message":{"tool_calls":[{"function":{"name":"read_file"}}]}}"#,
+                "\n",
+                r#"{"message":{"tool_calls":[{"function":{"name":"grep"}}]}}"#,
+                "\n",
+                r#"{"done":true}"#,
+                "\n",
+            ],
+            None,
+        )
+        .await;
+        assert_eq!(result.tool_calls.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn blank_and_unparseable_lines_are_skipped_not_fatal() {
+        let (result, _) = drain(
+            vec!["\n", "not json\n", r#"{"message":{"content":"ok"}}"#, "\n", r#"{"done":true}"#, "\n"],
+            None,
+        )
+        .await;
+        assert_eq!(result.content, "ok");
+    }
+
+    #[test]
+    fn guard_drops_the_entry_on_every_exit_path() {
+        let cancels = Arc::new(ChatCancels::default());
+        {
+            let _rx = cancels.register("req-1");
+            let _guard = CancelGuard {
+                cancels: Arc::clone(&cancels),
+                id: "req-1".into(),
+            };
+            assert_eq!(cancels.len(), 1);
+        }
+        assert_eq!(cancels.len(), 0, "a completed chat must not leak its sender");
+    }
+
+    #[test]
+    fn dropping_the_sender_still_wakes_the_receiver() {
+        // A duplicate request id replaces the previous sender; the displaced
+        // receiver must resolve so its stream doesn't hang forever. Asserting
+        // `Closed` specifically — `is_err()` would also hold for `Empty`, i.e.
+        // for the broken case where the old sender was left armed.
+        let cancels = ChatCancels::default();
+        let mut first = cancels.register("dup");
+        let _second = cancels.register("dup");
+        assert_eq!(first.try_recv(), Err(TryRecvError::Closed));
+        assert_eq!(cancels.len(), 1);
     }
 }
