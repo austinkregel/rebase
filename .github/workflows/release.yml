@@ -119,11 +119,15 @@ jobs:
         shell: bash
         run: bash scripts/set-version.sh "${{ github.event.inputs.tag || github.ref_name }}"
 
-      - uses: tauri-apps/tauri-action@v1
+      # macOS signing + notarization. Without a certificate the bundle is ad-hoc
+      # signed and Gatekeeper blocks it on any machine but the builder's — but
+      # the vars have to be *absent*, not empty: Tauri's bundler treats a defined
+      # APPLE_CERTIFICATE as "sign this" and dies in `security import`. Passing
+      # them straight through as step env would define them unconditionally,
+      # since an unset secret expands to an empty string.
+      - name: Enable Apple code signing
+        if: matrix.runner == 'macos-latest'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing + notarization. Without these the bundle is ad-hoc
-          # signed and Gatekeeper blocks it on any machine but the builder's.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -131,6 +135,20 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::notice::No APPLE_CERTIFICATE secret — building ad-hoc signed."
+            exit 0
+          fi
+          for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+                     APPLE_SIGNING_IDENTITY KEYCHAIN_PASSWORD \
+                     APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            printf '%s=%s\n' "$var" "${!var}" >> "$GITHUB_ENV"
+          done
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: rebase ${{ github.event.inputs.tag || github.ref_name }}
