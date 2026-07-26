@@ -50,9 +50,9 @@ function releaseUrl(asset: string): string {
  * local user can't plant a malicious binary. Falls back to /tmp only when the
  * agent hasn't reported a home yet.
  */
-function agentDirs(home?: string): { root: string; bin: string; binPath: string; marker: string } {
+function agentDirs(home?: string): { root: string; bin: string; binPath: string } {
   const base = home && home.trim() ? `${home.replace(/\/+$/, '')}/.rebase` : '/tmp/rebase'
-  return { root: base, bin: `${base}/bin`, binPath: `${base}/bin/rebase-indexer`, marker: `${base}/bin/.version` }
+  return { root: base, bin: `${base}/bin`, binPath: `${base}/bin/rebase-indexer` }
 }
 
 /** One search hit returned by the `search_code` Tauri command. */
@@ -84,27 +84,88 @@ export function localIndexDir(clientId: string, root: string): Promise<string> {
   return invoke<string>('crucible_local_index_dir', { clientId, root })
 }
 
+type ExecResult = Awaited<ReturnType<typeof fileService.exec>>
+
+function blockedReason(code: number): string {
+  return code === 126
+    ? 'blocked by the exec allowlist'
+    : code === 127
+      ? 'not installed / not on PATH'
+      : `exit ${code}`
+}
+
+/**
+ * Run a command on the agent, and if it's refused by the agent's exec allowlist
+ * (exit 126), authorize the given commands and retry once. Granting is *reactive*
+ * — we only modify the allowlist after the agent has actually blocked a command,
+ * so an allow-all agent (which never returns 126) is never touched, and an agent
+ * with a local allowlist floor still gets the indexer commands added to its
+ * effective (merged) policy.
+ */
+async function execWithGrant(
+  clientId: string,
+  projectId: string,
+  command: string,
+  cwd: string | undefined,
+  opts: { timeoutSec: number; timeoutMs: number },
+  grantCommands: string[],
+): Promise<ExecResult> {
+  let res = await fileService.exec(clientId, command, cwd, opts)
+  if (res.code === 126) {
+    await grantExec(projectId, grantCommands)
+    res = await fileService.exec(clientId, command, cwd, opts)
+  }
+  return res
+}
+
+/**
+ * The cached indexer's current SHA-256 on the agent, lowercased — or '' if it's
+ * absent or can't be hashed. Tries `sha256sum` then `shasum -a 256`, reactively
+ * authorizing the hash tool if the allowlist blocks it.
+ */
+async function currentChecksum(
+  clientId: string,
+  projectId: string,
+  shaCmds: string[],
+  grantCommands: string[],
+): Promise<string> {
+  for (const cmd of shaCmds) {
+    const res = await execWithGrant(
+      clientId,
+      projectId,
+      cmd,
+      undefined,
+      { timeoutSec: 120, timeoutMs: 125_000 },
+      grantCommands,
+    )
+    if (res.code === 0) {
+      const out = (res.stdout.trim().split(/\s+/)[0] ?? '').toLowerCase()
+      if (out) return out
+    }
+    // code 1 = file missing, 126 = still blocked, 127 = tool absent → try next.
+  }
+  return ''
+}
+
 /**
  * Make sure the indexer binary exists on the agent. The agent downloads the
  * matching release asset *directly from GitHub* (curl, wget fallback) — pushing
- * a ~180MB binary over the control-plane socket is a non-starter. We then verify
- * its SHA-256 against the pinned hash before running it, and cache it in the
- * agent's home (`~/.rebase/bin`, chmod 700) so it persists and can't be planted.
+ * a ~180MB binary over the control-plane socket is a non-starter. We verify its
+ * SHA-256 against the pinned hash before running it, and cache it in the agent's
+ * home (`~/.rebase/bin`, chmod 700) so it persists and can't be planted.
+ *
+ * Presence is detected by hashing the cached binary and comparing to the pinned
+ * value — the checksum IS the version marker. (The old `.version` marker was
+ * written via file_put, which could silently time out, so the marker never
+ * persisted and every rebuild re-downloaded ~180MB.)
  */
 async function ensureBinary(clientId: string, projectId: string): Promise<string> {
   const agent = useAgentsStore().byId(clientId)
   const asset = indexerAsset(agent?.platform, agent?.arch)
-  const { root, bin, binPath, marker } = agentDirs(agent?.home)
-
-  // Skip the (re)download when this version is already installed+verified. Probe
-  // the version marker with file_get (read) — NOT dir_list, which the agent
-  // restricts to its browse roots. The marker is written only AFTER checksum
-  // verification, so a matching marker means the cached binary is trusted.
-  try {
-    const installed = (await fileService.read(clientId, marker)).trim()
-    if (installed === INDEXER_VERSION) return binPath
-  } catch {
-    /* no marker (or unreadable) → (re)install */
+  const { root, bin, binPath } = agentDirs(agent?.home)
+  const expected = INDEXER_SHA256[asset]
+  if (!expected) {
+    throw new Error(`Crucible has no pinned checksum for ${asset} @ ${INDEXER_VERSION}`)
   }
 
   const url = releaseUrl(asset)
@@ -112,76 +173,38 @@ async function ensureBinary(clientId: string, projectId: string): Promise<string
   const wgetCmd = `wget -O ${binPath} ${url}`
   const sha256Cmd = `sha256sum ${binPath}`
   const shasumCmd = `shasum -a 256 ${binPath}`
+  const shaCmds = [sha256Cmd, shasumCmd]
+  // Authorize exactly the commands we run (allowlist is prefix-matched).
+  const grantCmds = [curlCmd, wgetCmd, sha256Cmd, shasumCmd, binPath]
 
-  // Authorize exactly the commands we run (allowlist is prefix-matched), then
-  // let the agent fetch + verify the binary itself.
-  await grantExec(projectId, [curlCmd, wgetCmd, sha256Cmd, shasumCmd, binPath])
+  // Already installed + verified? Skip the download entirely.
+  if ((await currentChecksum(clientId, projectId, shaCmds, grantCmds)) === expected) {
+    return binPath
+  }
+
   await fileService.mkdir(clientId, bin)
   // Lock down the cache root so other local users can't tamper with the binary.
   await fileService.chmod(clientId, root, '700').catch(() => {})
 
   const opts = { timeoutSec: FETCH_TIMEOUT_SEC, timeoutMs: FETCH_TIMEOUT_MS }
-  const curl = await fileService.exec(clientId, curlCmd, undefined, opts)
-  if (!curl.ok || curl.code !== 0) {
-    const wget = await fileService.exec(clientId, wgetCmd, undefined, opts)
-    if (!wget.ok || wget.code !== 0) {
-      const detail = [curl, wget]
-        .map((r, i) => `${i === 0 ? 'curl' : 'wget'} exit ${r.code}: ${(r.stderr || r.error || '').trim()}`)
+  const curl = await execWithGrant(clientId, projectId, curlCmd, undefined, opts, grantCmds)
+  if (curl.code !== 0) {
+    const wget = await execWithGrant(clientId, projectId, wgetCmd, undefined, opts, grantCmds)
+    if (wget.code !== 0) {
+      const detail = ([['curl', curl], ['wget', wget]] as const)
+        .map(([n, r]) => `${n} exit ${r.code}: ${(r.stderr || r.error || '').trim() || blockedReason(r.code)}`)
         .join('; ')
       throw new Error(`agent could not download the indexer (${detail})`)
     }
   }
 
-  await verifyChecksum(clientId, binPath, asset, [sha256Cmd, shasumCmd])
-
-  await fileService.chmod(clientId, binPath, '755')
-  // Record the installed version (only reached after a verified install).
-  await fileService.write(clientId, marker, INDEXER_VERSION).catch(() => {})
-  return binPath
-}
-
-/**
- * Verify the downloaded binary against the pinned SHA-256, deleting it and
- * throwing on mismatch — we refuse to execute a binary that doesn't match the
- * release we shipped hashes for (supply-chain / MITM defense). Uses `sha256sum`
- * (linux) or `shasum -a 256` (darwin) on the agent.
- */
-async function verifyChecksum(
-  clientId: string,
-  binPath: string,
-  asset: string,
-  cmds: string[],
-): Promise<void> {
-  const expected = INDEXER_SHA256[asset]
-  if (!expected) {
-    throw new Error(`Crucible has no pinned checksum for ${asset} @ ${INDEXER_VERSION}`)
-  }
-  let got = ''
-  const failures: string[] = []
-  for (const cmd of cmds) {
-    const res = await fileService.exec(clientId, cmd, undefined, { timeoutSec: 120, timeoutMs: 125_000 })
-    if (res.ok && res.code === 0) {
-      const out = (res.stdout.trim().split(/\s+/)[0] ?? '').toLowerCase()
-      if (out) {
-        got = out
-        break
-      }
-    }
-    const tool = cmd.split(' ')[0]
-    const why =
-      res.code === 126
-        ? 'blocked by the exec allowlist'
-        : res.code === 127
-          ? 'not installed / not on PATH'
-          : (res.stderr || res.error || `exit ${res.code}`).trim()
-    failures.push(`${tool}: ${why}`)
-  }
+  // Verify against the pinned hash before we ever execute it.
+  const got = await currentChecksum(clientId, projectId, shaCmds, grantCmds)
   if (!got) {
     await fileService.delete(clientId, binPath).catch(() => {})
     throw new Error(
-      `Couldn't verify the indexer — no usable checksum tool (${failures.join('; ')}). ` +
-        'Allow-list `sha256sum` (or `shasum -a 256`) on the agent, then retry. ' +
-        'Refusing to run an unverified binary.',
+      'Couldn\'t verify the indexer — no usable checksum tool on the agent. ' +
+        'Allow-list `sha256sum` (or `shasum -a 256`), then retry. Refusing to run an unverified binary.',
     )
   }
   if (got !== expected) {
@@ -191,26 +214,41 @@ async function verifyChecksum(
         'The downloaded binary does not match the pinned release — refusing to run it.',
     )
   }
+
+  await fileService.chmod(clientId, binPath, '755')
+  return binPath
 }
 
 /**
- * Ensure `commands` are in the agent's exec allowlist so the agent will run
- * them. The PUT replaces the whole list, so we GET → merge → PUT. An empty list
- * already means allow-all (nothing to do). A real grant is recorded in the chat
- * log + a toast because it's a security-relevant change made on the user's behalf.
+ * Authorize `commands` on the control plane so the agent will run them, via the
+ * atomic add endpoint (POST) — it merges into the canonical list and re-pushes to
+ * every agent without clobbering concurrent edits or clearing the list. Called
+ * reactively, only after an agent has actually blocked a command (exit 126), so
+ * we never modify an allow-all agent. The grant is recorded in the chat log + a
+ * toast because it's a security-relevant change made on the user's behalf.
+ *
+ * NOTE: the control-plane allowlist is shared across the fleet — adding here
+ * authorizes the command on every agent on this control plane (and, per the
+ * agent's merge policy, leaves each agent's local allowlist floor intact).
  */
 async function grantExec(projectId: string, commands: string[]): Promise<void> {
   const cp = useSessionStore().selectedControlPlane?.name
-  let current: string[]
+  // Best-effort: only grant the commands not already present (avoids a redundant
+  // push + note). If we can't read the current list, add them all — the server's
+  // add op is idempotent.
+  let missing = commands
   try {
-    current = await platform.getExecAllowlist(cp)
+    const current = await platform.getExecAllowlist(cp)
+    if (current.length) missing = commands.filter((c) => !current.includes(c))
   } catch {
-    return // best-effort: if we can't read policy, let the build surface any block
+    /* couldn't read policy — add them all */
   }
-  if (current.length === 0) return // empty = allow-all
-  const missing = commands.filter((c) => !current.includes(c))
   if (!missing.length) return
-  await platform.setExecAllowlist([...current, ...missing], cp)
+  try {
+    await platform.addExecAllowlist(missing, 'crucible', cp)
+  } catch {
+    return // couldn't update policy — the caller's retry will surface the block
+  }
   appendSystemNote(
     projectId,
     `Authorized Crucible on this server — added ${missing.map((m) => `\`${m}\``).join(', ')} to the control-plane exec allowlist.`,
@@ -221,14 +259,24 @@ async function grantExec(projectId: string, commands: string[]): Promise<void> {
   })
 }
 
-/** Run the indexer on the agent, throwing on a non-zero exit. */
-async function runIndexer(clientId: string, args: string[], cwd: string): Promise<void> {
-  const res = await fileService.exec(clientId, args.join(' '), cwd, {
-    timeoutSec: BUILD_TIMEOUT_SEC,
-    timeoutMs: BUILD_TIMEOUT_MS,
-  })
-  if (!res.ok || res.code !== 0) {
-    const detail = (res.stderr || res.error || `exit ${res.code}`).trim()
+/** Run the indexer on the agent, throwing on a non-zero exit. Reactively
+ *  authorizes the binary if the agent's allowlist blocks it (args[0] = binPath). */
+async function runIndexer(
+  clientId: string,
+  projectId: string,
+  args: string[],
+  cwd: string,
+): Promise<void> {
+  const res = await execWithGrant(
+    clientId,
+    projectId,
+    args.join(' '),
+    cwd,
+    { timeoutSec: BUILD_TIMEOUT_SEC, timeoutMs: BUILD_TIMEOUT_MS },
+    [args[0]],
+  )
+  if (res.code !== 0) {
+    const detail = (res.stderr || res.error || blockedReason(res.code)).trim()
     throw new Error(detail || 'indexer failed')
   }
 }
@@ -267,12 +315,13 @@ export async function rebuild(project: Project): Promise<void> {
     setIndexPhase(pid, 'building')
     await runIndexer(
       clientId,
+      pid,
       [bin, 'index', root, '--ollama', ollamaUrl, '--model', embedModel],
       root,
     )
 
     setIndexPhase(pid, 'packing')
-    await runIndexer(clientId, [bin, 'pack', '--index', indexDir, '--out', archivePath], root)
+    await runIndexer(clientId, pid, [bin, 'pack', '--index', indexDir, '--out', archivePath], root)
 
     setIndexPhase(pid, 'downloading')
     // The packed index can be sizable and streams over the WS in chunks, so
