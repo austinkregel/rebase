@@ -21,8 +21,8 @@ const error = ref<string | null>(null)
 
 const path = computed(() => joinPath(props.parentPath, props.entry.name))
 const isDir = computed(() => props.entry.type === 'dir')
-const isExpanded = computed(() => files.expanded.has(path.value))
-const children = computed(() => files.tree[path.value])
+const isExpanded = computed(() => files.isExpanded(props.clientId, path.value))
+const children = computed(() => files.entriesFor(props.clientId, path.value))
 const isActive = computed(() => files.activePath === path.value)
 const isOpen = computed(() => files.openFiles.some((f) => f.path === path.value))
 

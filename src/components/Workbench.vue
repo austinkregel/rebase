@@ -16,6 +16,7 @@ import { useFilesStore, type OpenFile } from '@/stores/files'
 import { useSessionStore } from '@/stores/session'
 import { useAgentsStore } from '@/stores/agents'
 import { dock, type OpenTerminalOptions } from '@/services/dock'
+import { loadValueMigrating, saveValue } from '@/services/store'
 import { setActiveTerminal } from '@/services/terminals'
 import { registerCommands } from '@/services/commands'
 import { viewsFor } from '@/services/views'
@@ -38,27 +39,40 @@ function onToolsLeave() {
 }
 
 // --- Column layout (IDEA-style frame around the editor) ---
-const FRAME_KEY = 'rebase.frame.v1'
+// Both keys go through services/store.ts. In the browser they resolve to the
+// same localStorage keys as before ('rebase.' + key); on desktop they move into
+// rebase.json, and loadValueMigrating adopts the webview's old copy once.
+const FRAME_KEY = 'frame.v1'
+const FRAME_LEGACY_KEY = 'rebase.frame.v1'
 const widths = reactive({ servers: 190, project: 230, tools: 340 })
 const serversOpen = ref(true)
 const toolsOpen = ref(false)
 
-function loadFrame() {
-  try {
-    const f = JSON.parse(localStorage.getItem(FRAME_KEY) || '{}')
-    if (f.widths) Object.assign(widths, f.widths)
-    if (typeof f.serversOpen === 'boolean') serversOpen.value = f.serversOpen
-    if (typeof f.toolsOpen === 'boolean') toolsOpen.value = f.toolsOpen
-  } catch {
-    /* ignore */
-  }
+interface FrameState {
+  widths?: Partial<typeof widths>
+  serversOpen?: boolean
+  toolsOpen?: boolean
 }
-loadFrame()
+
+// Persistence is async now, so the defaults are on screen for a tick before the
+// saved frame lands. Don't write until it has, or that tick overwrites it.
+const frameHydrated = ref(false)
+
+async function loadFrame() {
+  const f = await loadValueMigrating<FrameState>(FRAME_KEY, FRAME_LEGACY_KEY, {})
+  if (f.widths) Object.assign(widths, f.widths)
+  if (typeof f.serversOpen === 'boolean') serversOpen.value = f.serversOpen
+  if (typeof f.toolsOpen === 'boolean') toolsOpen.value = f.toolsOpen
+  frameHydrated.value = true
+}
+
 watch([widths, serversOpen, toolsOpen], () => {
-  localStorage.setItem(
-    FRAME_KEY,
-    JSON.stringify({ widths, serversOpen: serversOpen.value, toolsOpen: toolsOpen.value }),
-  )
+  if (!frameHydrated.value) return
+  void saveValue<FrameState>(FRAME_KEY, {
+    widths: { ...widths },
+    serversOpen: serversOpen.value,
+    toolsOpen: toolsOpen.value,
+  })
 })
 
 function startDrag(target: 'servers' | 'project' | 'tools', e: MouseEvent) {
@@ -85,10 +99,13 @@ const components = {
 const tabComponents = {
   editorTab: markRaw(EditorTab),
 }
-const LAYOUT_KEY = 'rebase.editor.v2'
+const LAYOUT_KEY = 'editor.v2'
+const LAYOUT_LEGACY_KEY = 'rebase.editor.v2'
 const dockApi = shallowRef<DockviewApi | null>(null)
 const editorIds = new Set<string>()
 let editorGroupId: string | null = null
+/** True while fromJSON rebuilds the layout — suppresses the save handler. */
+let hydratingLayout = false
 let terminalSeq = 0
 const editorEmpty = ref(true)
 
@@ -133,16 +150,22 @@ function openTerminal(opts?: OpenTerminalOptions) {
   })
 }
 
-function onReady(event: DockviewReadyEvent) {
+async function onReady(event: DockviewReadyEvent) {
   const api = event.api
   dockApi.value = api
 
-  const saved = localStorage.getItem(LAYOUT_KEY)
+  // fromJSON fires onDidLayoutChange as it rebuilds; with an async read the
+  // handler is already live, so guard the write or a half-built layout is what
+  // gets saved.
+  const saved = await loadValueMigrating<object | null>(LAYOUT_KEY, LAYOUT_LEGACY_KEY, null)
   if (saved) {
+    hydratingLayout = true
     try {
-      api.fromJSON(JSON.parse(saved))
+      api.fromJSON(saved as Parameters<typeof api.fromJSON>[0])
     } catch {
       api.clear()
+    } finally {
+      hydratingLayout = false
     }
   }
   // A fresh workspace starts empty (the watermark overlay prompts the user) —
@@ -167,11 +190,8 @@ function onReady(event: DockviewReadyEvent) {
   })
   api.onDidLayoutChange(() => {
     editorEmpty.value = api.panels.length === 0
-    try {
-      localStorage.setItem(LAYOUT_KEY, JSON.stringify(api.toJSON()))
-    } catch {
-      /* ignore */
-    }
+    if (hydratingLayout) return
+    void saveValue(LAYOUT_KEY, api.toJSON())
   })
 
   dock.openTerminal = openTerminal
@@ -223,6 +243,7 @@ function closeAllEditors() {
 
 let disposeWorkbenchCommands: (() => void) | undefined
 onMounted(() => {
+  void loadFrame()
   disposeWorkbenchCommands = registerCommands([
     { id: 'view.toggleServers', title: 'Toggle Servers Sidebar', category: 'View', run: () => { serversOpen.value = !serversOpen.value } },
     { id: 'view.toggleTools', title: 'Toggle Tools Sidebar', category: 'View', run: () => { toolsOpen.value = !toolsOpen.value } },

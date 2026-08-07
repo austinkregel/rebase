@@ -27,6 +27,7 @@ let stopReopenWatch: (() => void) | undefined
 
 onMounted(() => {
   agents.listen()
+  void agents.hydrate()
   void settings.load()
   void projects.load()
   void files.loadExpanded()

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import type { EditorSettings } from '@/cm/setup'
-import { loadValue, saveValue } from '@/services/store'
+import { loadValue, removeValue, saveValue } from '@/services/store'
 import { normalizeRoot } from '@/services/paths'
 import { useSessionStore } from './session'
 import { useGitStore } from './git'
@@ -62,6 +62,21 @@ export const useProjectsStore = defineStore('projects', {
       this.activeId = ui.activeId && exists.has(ui.activeId) ? ui.activeId : null
       this.expandedIds = new Set((ui.expandedIds ?? []).filter((id) => exists.has(id)))
       this.loaded = true
+      // 'workspaces' predates 'projects' and nothing has read it in a long time;
+      // leaving it in the file just invites the question of which one is real.
+      void removeValue('workspaces')
+    },
+
+    /** Point a project at a different server. Its roots are paths, not handles,
+     *  so they carry over untouched — this exists because an agent's clientId
+     *  can change (renamed, reinstalled, re-cased) and a saved project is then
+     *  addressing a machine the control plane has never heard of. */
+    async moveToServer(id: string, clientId: string) {
+      const project = this.projects.find((p) => p.id === id)
+      if (!project || !clientId || project.clientId === clientId) return
+      project.clientId = clientId
+      await this.persist()
+      if (this.activeId === id) useSessionStore().selectAgent(clientId)
     },
 
     async persist() {
@@ -115,13 +130,16 @@ export const useProjectsStore = defineStore('projects', {
       await this.persist()
     },
 
-    /** Append a root directory to a project. */
-    async addRoot(id: string, path: string) {
+    /** Append a root directory to a project. Returns the normalized root (also
+     *  when it was already present) so callers can expand exactly that key. */
+    async addRoot(id: string, path: string): Promise<string | null> {
       const project = this.projects.find((p) => p.id === id)
       const root = normalizeRoot(path)
-      if (!project || !root || project.rootPaths.includes(root)) return
+      if (!project || !root) return null
+      if (project.rootPaths.includes(root)) return root
       project.rootPaths.push(root)
       await this.persist()
+      return root
     },
 
     /** Remove a root directory from a project (does not delete files). */

@@ -7,6 +7,9 @@ vi.mock('@/services/store', () => ({
   saveValue: vi.fn(async (key: string, value: unknown) => {
     saved[key] = JSON.parse(JSON.stringify(value))
   }),
+  removeValue: vi.fn(async (key: string) => {
+    delete saved[key]
+  }),
 }))
 // Avoid pulling the real session/git stores (and their deps) into the test.
 vi.mock('./session', () => ({ useSessionStore: () => ({ selectAgent: vi.fn() }) }))
@@ -81,5 +84,40 @@ describe('projects store — multi-root', () => {
     await projects.load()
     expect(projects.activeId).toBeNull()
     expect(projects.expandedIds.size).toBe(0)
+  })
+
+  it('retires the dead "workspaces" key on load', async () => {
+    saved['workspaces'] = { legion: ['C:\\'] }
+    saved['projects'] = []
+    await useProjectsStore().load()
+    expect(saved['workspaces']).toBeUndefined()
+  })
+
+  it('moveToServer repoints a project without touching its roots', async () => {
+    const projects = useProjectsStore()
+    const p = await projects.create({
+      name: 'rebase',
+      controlPlane: null,
+      clientId: 'Mnemosyne',
+      rootPaths: ['/Users/a/src/rebase', '/Users/a/src/rebase-indexer'],
+    })
+    await projects.moveToServer(p.id, 'mnemosyne')
+    expect(projects.projects[0].clientId).toBe('mnemosyne')
+    // Roots are paths on the machine, not handles to it — they survive as-is.
+    expect(projects.projects[0].rootPaths).toEqual([
+      '/Users/a/src/rebase',
+      '/Users/a/src/rebase-indexer',
+    ])
+    // And it is persisted, not just live state.
+    expect((saved['projects'] as { clientId: string }[])[0].clientId).toBe('mnemosyne')
+  })
+
+  it('moveToServer ignores an unknown project or a no-op move', async () => {
+    const projects = useProjectsStore()
+    const p = await projects.create({ name: 'a', controlPlane: null, clientId: 'c1', rootPaths: ['/a'] })
+    await projects.moveToServer('nope', 'c2')
+    await projects.moveToServer(p.id, '')
+    await projects.moveToServer(p.id, 'c1')
+    expect(projects.projects[0].clientId).toBe('c1')
   })
 })

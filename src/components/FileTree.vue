@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { ArrowPathIcon, DocumentPlusIcon, FolderIcon, FolderPlusIcon } from '@heroicons/vue/20/solid'
 import { useFilesStore } from '@/stores/files'
 import { useSessionStore } from '@/stores/session'
+import { useAgentsStore } from '@/stores/agents'
 import { joinPath } from '@/services/paths'
 import FileTreeItem from './FileTreeItem.vue'
 import SectionHeader from './ui/SectionHeader.vue'
@@ -13,6 +14,7 @@ import InlineInput from './ui/InlineInput.vue'
 // via the path box; it is independent of the persisted project workspace.
 const files = useFilesStore()
 const session = useSessionStore()
+const agents = useAgentsStore()
 const error = ref<string | null>(null)
 const loading = ref(false)
 const pathInput = ref(files.browseRoot)
@@ -20,7 +22,12 @@ const pathInput = ref(files.browseRoot)
 // Inline new file/folder at the browse root.
 const creating = ref<null | 'file' | 'folder'>(null)
 
-const entries = computed(() => files.tree[files.browseRoot])
+const entries = computed(() => files.entriesFor(session.activeClientId, files.browseRoot))
+// Reactive, so the notice clears itself the moment client_list says the server
+// is back — no stale error left sitting where a tree should be.
+const offline = computed(
+  () => !!session.activeClientId && !agents.isOnline(session.activeClientId),
+)
 
 async function loadRoot() {
   if (!session.activeClientId) return
@@ -47,10 +54,12 @@ watch(
     pathInput.value = root
   },
 )
+// `offline` is a dependency, not just a guard: listing the browse root is what
+// should happen the moment the server comes back, without another click.
 watch(
-  () => [session.activeClientId, files.browseRoot],
+  () => [session.activeClientId, files.browseRoot, offline.value],
   () => {
-    if (session.activeClientId && !files.tree[files.browseRoot]) void loadRoot()
+    if (session.activeClientId && !offline.value && !entries.value) void loadRoot()
   },
   { immediate: true },
 )
@@ -98,6 +107,9 @@ async function commitCreate(name: string) {
     <div class="flex-1 overflow-auto py-1">
       <p v-if="!session.activeClientId" class="mx-3 my-2 text-sm text-subtle">
         connect to a machine to browse files
+      </p>
+      <p v-else-if="offline" class="mx-3 my-2 text-sm text-subtle">
+        {{ agents.displayName(session.activeClientId) }} is offline
       </p>
       <p v-else-if="loading" class="mx-3 my-2 text-sm text-subtle">loading…</p>
       <p v-else-if="error" class="mx-3 my-2 text-sm text-red">{{ error }}</p>

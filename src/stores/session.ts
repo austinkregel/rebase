@@ -111,11 +111,13 @@ export const useSessionStore = defineStore('session', {
 
     /** Pick which discovered server the workbench addresses. */
     selectAgent(clientId: string | null) {
-      // Reset agent-specific state only on a real change, so panel remounts
-      // (e.g. dragging the Explorer panel) don't wipe open files.
+      // Close buffers only on a real change, so panel remounts (e.g. dragging
+      // the Explorer panel) don't wipe open files. Cached listings are keyed by
+      // clientId and deliberately survive: the Project explorer lists roots from
+      // every server at once, not just the active one.
       if (clientId !== this.activeClientId) {
         const files = useFilesStore()
-        files.reset()
+        files.closeAllFiles()
         // Point the File explorer at the OS-appropriate root (C:\ on Windows,
         // / elsewhere). Projects own their own roots independently.
         const platformName = clientId ? useAgentsStore().byId(clientId)?.platform : undefined
@@ -128,6 +130,8 @@ export const useSessionStore = defineStore('session', {
 
     onStatus(status: SocketStatus) {
       this.socketStatus = status
+      // The agent list is only meaningful while the socket carrying it is up.
+      useAgentsStore().onSocketStatus(status)
       if (status === 'open') {
         this.phase = 'connected'
       } else if (status === 'connecting') {

@@ -34,6 +34,52 @@ export async function loadValue<T>(key: string, fallback: T): Promise<T> {
   }
 }
 
+/** Forget a key entirely (used to retire keys we no longer read). */
+export async function removeValue(key: string): Promise<void> {
+  if (isTauri()) {
+    try {
+      const store = await getTauriStore()
+      await store.delete(key)
+      await store.save()
+    } catch {
+      /* ignore persistence failure */
+    }
+    return
+  }
+  try {
+    localStorage.removeItem(PREFIX + key)
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Load a key that used to be written to raw `localStorage`, adopting the old
+ * value the first time and persisting it forward. On desktop those writes went
+ * to the *webview's* localStorage rather than `rebase.json`, so without this
+ * the move would silently reset everyone's window layout.
+ *
+ * `legacyKey` is the full old key (already prefixed). Delete this once installs
+ * have rolled over — nothing but the migration depends on it.
+ */
+export async function loadValueMigrating<T>(key: string, legacyKey: string, fallback: T): Promise<T> {
+  const sentinel = Symbol('missing')
+  const current = await loadValue<T | typeof sentinel>(key, sentinel)
+  if (current !== sentinel) return current as T
+  try {
+    const raw = localStorage.getItem(legacyKey)
+    if (raw) {
+      const value = JSON.parse(raw) as T
+      await saveValue(key, value)
+      localStorage.removeItem(legacyKey)
+      return value
+    }
+  } catch {
+    /* fall through to the default */
+  }
+  return fallback
+}
+
 export async function saveValue<T>(key: string, value: T): Promise<void> {
   if (isTauri()) {
     try {
