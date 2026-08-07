@@ -1,0 +1,62 @@
+name: CI
+
+# The same checks the Release workflow's `verify` job runs, but on every push
+# and PR instead of only on a tag. Without this, a break on main is invisible
+# until someone tags — at which point it fails 40 minutes into a release.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A PR that gets three pushes in a minute does not need three full runs; the
+  # last one is the answer. main is excluded — every commit there should keep
+  # its own result.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  web:
+    name: Typecheck and unit tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  rust:
+    name: Cargo test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's Rust deps need the webkit stack even to type-check the crate.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf xdg-utils libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev pkg-config libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      # LanceDB's lance-encoding build script runs prost, which shells out to
+      # protoc. No runner image ships it.
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          # Distinct from the release workflow's cache: that one builds with
+          # --remap-path-prefix in RUSTFLAGS, so the two would thrash a shared key.
+          key: ci
+      - run: cargo test --workspace

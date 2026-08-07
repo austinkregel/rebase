@@ -1,10 +1,14 @@
 name: Release
 
 # Tagging v1.2.3 builds the desktop app on every platform and attaches the
-# bundles to a draft GitHub release. The tag is the only source of truth for the
-# version: scripts/set-version.sh stamps it into package.json, tauri.conf.json
-# and the Cargo manifests at build time, so releasing never requires a commit
-# that bumps those five files.
+# bundles to the GitHub release for that tag. The tag is the only source of
+# truth for the version: scripts/set-version.sh stamps it into package.json,
+# tauri.conf.json and the Cargo manifests at build time, so releasing never
+# requires a commit that bumps those five files.
+#
+# One release per tag, created up front by create-release and then uploaded to
+# by every build job. The release is published immediately and fills in as the
+# platforms finish, so it is briefly visible with only some of its bundles.
 on:
   push:
     tags: ['v*.*.*']
@@ -56,9 +60,54 @@ jobs:
           workspaces: '. -> target'
       - run: cargo test --workspace
 
+  # One release, created once, before anything uploads to it. The three build
+  # jobs used to each hand tauri-action the same `tagName` and let it create the
+  # release if missing — which is a race three ways, and how v0.0.3 ended up as
+  # a published release with zero assets next to a draft holding all seven.
+  create-release:
+    name: Create release
+    needs: verify
+    runs-on: ubuntu-22.04
+    outputs:
+      release_id: ${{ steps.target.outputs.release_id }}
+    steps:
+      - name: Find or create the release
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          # Reuse an existing release for the tag rather than adding a second
+          # one: a re-run should top up the same release, not fork it. If that
+          # release is still a draft (left over from the old workflow), publish
+          # it — the tag is the release, and there is only ever the one.
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+                  --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          count=$(printf '%s' "$ids" | grep -c . || true)
+
+          # Duplicates are what this job exists to prevent, so don't paper over
+          # ones that already exist: picking whichever the API happened to list
+          # first is how bundles end up split across two releases.
+          if [ "$count" -gt 1 ]; then
+            echo "::error::$count releases share tag $TAG (ids: $(echo $ids)). Delete all but one and re-run."
+            exit 1
+          fi
+
+          if [ "$count" -eq 1 ]; then
+            id="$ids"
+            gh api "repos/$GITHUB_REPOSITORY/releases/$id" -X PATCH -F draft=false >/dev/null
+            echo "::notice::Reusing release $id for $TAG"
+          else
+            id=$(gh api "repos/$GITHUB_REPOSITORY/releases" -X POST \
+                   -f tag_name="$TAG" -f name="rebase $TAG" \
+                   -F draft=false -F prerelease=false --jq '.id')
+            echo "::notice::Created release $id for $TAG"
+          fi
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
   release:
     name: Build ${{ matrix.label }}
-    needs: verify
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +145,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.targets }}
+
+      # Shipped binaries otherwise embed the runner's absolute paths — the
+      # checkout dir and every ~/.cargo/registry crate — in debug info and
+      # panic messages. Nothing downstream can use them, and they describe the
+      # build host to anyone with a hex editor.
+      #
+      # Cargo's own `trim-paths` profile key would be tidier but is still
+      # nightly-only as of 1.94, and .tool-versions pins stable. --remap-path-prefix
+      # is the stable spelling. Set before rust-cache so its key covers RUSTFLAGS;
+      # set via $GITHUB_ENV because a workflow `env:` value gets no shell expansion
+      # and CARGO_HOME differs on all three runners.
+      - name: Strip build paths from release binaries
+        shell: bash
+        run: |
+          echo "RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=/rebase --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo" >> "$GITHUB_ENV"
+
       # LanceDB's lance-encoding build script runs prost, which shells out to
       # protoc. No runner image ships it, on any of the three platforms.
       - uses: arduino/setup-protoc@v3
@@ -146,12 +211,12 @@ jobs:
             printf '%s=%s\n' "$var" "${!var}" >> "$GITHUB_ENV"
           done
 
+      # releaseId, not tagName: upload into the release create-release already
+      # made. Given a tag instead, each of the three jobs would decide for
+      # itself whether a release exists yet.
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: rebase ${{ github.event.inputs.tag || github.ref_name }}
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}

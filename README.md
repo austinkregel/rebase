@@ -33,6 +33,37 @@ rebase-cli/    `rebase auth|cp|keys`
 src-tauri/     desktop core: WS+TLS, deep links, crucible index, code search
 ```
 
+## Install
+
+Desktop bundles for macOS (universal `.dmg`), Linux (`.AppImage`, `.deb`,
+`.rpm`) and Windows (`.msi`, `.exe`) are attached to each
+[release](https://github.com/austinkregel/rebase/releases).
+
+They are **not code-signed** — there is no Apple Developer certificate and no
+Windows CA cert behind them, so both operating systems will object the first
+time. Nothing is wrong with the download; an unsigned app is simply one the OS
+cannot attribute to anyone.
+
+- **macOS** — the app is ad-hoc signed, so Gatekeeper refuses it outright
+  ("damaged and can't be opened" after a browser download, which is the
+  quarantine attribute talking, not corruption). Clear it once:
+
+  ```sh
+  xattr -d com.apple.quarantine /Applications/rebase.app
+  ```
+
+  Right-click → Open works instead on some macOS versions, but not since the
+  quarantine rules tightened — the `xattr` line is the reliable one.
+
+- **Windows** — SmartScreen shows "Windows protected your PC". *More info* →
+  *Run anyway*.
+
+- **Linux** — unaffected; none of this applies to the AppImage or the packages.
+
+If you would rather not take an unsigned binary on trust, build it yourself:
+`npm ci && npm run tauri build`. The bundles land in
+`src-tauri/target/release/bundle/`.
+
 ## Develop
 
 ```sh
