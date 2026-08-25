@@ -217,6 +217,98 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # createUpdaterArtifacts is on, so the bundler signs each updater
+          # artifact with key B and writes a .sig beside it. Without these the
+          # build fails outright rather than shipping unsigned updates.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+
+  # latest.json is what an installed app polls. It is assembled here rather
+  # than by the bundler because only this job can see all three platforms'
+  # artifacts at once. See docs/AUTO-UPDATE.md.
+  #
+  # A platform missing from the manifest does not error in the client — it
+  # tells that platform "you are up to date" forever. So every expected target
+  # is asserted, and a missing artifact or .sig fails the release.
+  updater-manifest:
+    name: Assemble latest.json
+    needs: [create-release, release]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Build and attach latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+
+          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate)
+
+          # updater key -> the artifact suffix that serves it. The macOS build is
+          # universal, so one .app.tar.gz answers for both darwin arches.
+          #
+          # linux-aarch64 and windows-aarch64 are absent on purpose: the release
+          # matrix does not build them. Adding a key here without a matching
+          # build would be worse than omitting it — the manifest would advertise
+          # an artifact that does not exist.
+          targets="darwin-aarch64:_universal.app.tar.gz
+          darwin-x86_64:_universal.app.tar.gz
+          linux-x86_64:.AppImage
+          windows-x86_64:-setup.exe"
+
+          platforms='{}'
+          while IFS= read -r line; do
+            key="${line%%:*}"
+            suffix="${line##*:}"
+            suffix="$(echo "$suffix" | xargs)"
+
+            # Exactly one artifact must match, or the mapping above is stale.
+            matches=$(echo "$assets" | jq -r --arg s "$suffix" \
+              '[.[] | select(.name | endswith($s)) | select(.name | endswith(".sig") | not)] | .[].name')
+            n=$(printf '%s' "$matches" | grep -c . || true)
+            if [ "$n" -ne 1 ]; then
+              echo "::error::$key: expected 1 artifact ending '$suffix', found $n ($(echo $matches))"
+              exit 1
+            fi
+            name="$matches"
+            url=$(echo "$assets" | jq -r --arg n "$name" '.[] | select(.name == $n) | .browser_download_url')
+
+            sig_id=$(echo "$assets" | jq -r --arg n "$name.sig" '.[] | select(.name == $n) | .id')
+            if [ -z "$sig_id" ] || [ "$sig_id" = "null" ]; then
+              echo "::error::$key: '$name' has no .sig — updater signing did not run for this platform."
+              exit 1
+            fi
+            signature=$(gh api -H "Accept: application/octet-stream" \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$sig_id")
+            if [ -z "$signature" ]; then
+              echo "::error::$key: '$name.sig' is empty."
+              exit 1
+            fi
+
+            platforms=$(echo "$platforms" | jq --arg k "$key" --arg u "$url" --arg s "$signature" \
+              '.[$k] = {signature: $s, url: $u}')
+            echo "  $key -> $name"
+          done <<< "$targets"
+
+          jq -n --arg v "$version" \
+                --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --arg n "See https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+                --argjson p "$platforms" \
+                '{version: $v, notes: $n, pub_date: $d, platforms: $p}' > latest.json
+
+          echo "--- latest.json ---"
+          jq '.platforms |= map_values({url, signature: (.signature[0:16] + "...")})' latest.json
+
+          # Replace rather than append: a re-run must not leave two latest.json
+          # assets on the release, which GitHub would disambiguate by renaming.
+          old=$(echo "$assets" | jq -r '.[] | select(.name == "latest.json") | .id')
+          if [ -n "$old" ] && [ "$old" != "null" ]; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"
+          fi
+          gh release upload "$TAG" latest.json --clobber
+          echo "::notice::Attached latest.json for $version"

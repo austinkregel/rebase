@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Core capability for the rebase window","local":true,"windows":["main"],"permissions":["core:default","store:default"]}}
+{"default":{"identifier":"default","description":"Core capability for the rebase window","local":true,"windows":["main"],"permissions":["core:default","store:default","updater:default","process:allow-restart"]}}

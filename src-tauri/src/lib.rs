@@ -211,6 +211,8 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let oidc = AppConfig::load().ok().and_then(|c| c.oidc);
             app.manage(Arc::new(Auth::new(oidc)));

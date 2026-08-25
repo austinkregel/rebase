@@ -36,17 +36,26 @@ always resolves to the current manifest. No server to run.
 
 ## Platforms (all major distros + arches)
 
-Six updater targets, matching the release matrix (AppImage is distro-agnostic, so
-it covers "all major distros"):
+Six updater targets were specified (AppImage is distro-agnostic, so it covers
+"all major distros"). Four of them ship today:
 
-| updater key | artifact |
-| ----------- | -------- |
-| `linux-x86_64` | `*.AppImage` |
-| `linux-aarch64` | `*.AppImage` |
-| `darwin-x86_64` | `*.app.tar.gz` |
-| `darwin-aarch64` | `*.app.tar.gz` |
-| `windows-x86_64` | `*-setup.exe` |
-| `windows-aarch64` | `*-setup.exe` |
+| updater key | artifact | shipping? |
+| ----------- | -------- | --------- |
+| `linux-x86_64` | `*.AppImage` | yes |
+| `darwin-x86_64` | `*.app.tar.gz` | yes (universal build) |
+| `darwin-aarch64` | `*.app.tar.gz` | yes (universal build) |
+| `windows-x86_64` | `*-setup.exe` | yes |
+| `linux-aarch64` | `*.AppImage` | **no — not built** |
+| `windows-aarch64` | `*-setup.exe` | **no — not built** |
+
+The release matrix builds three artifacts (macOS universal, Linux x86_64,
+Windows x86_64), and the universal macOS bundle answers for both darwin arches
+— so four of the six keys are live. The two aarch64 keys are deliberately
+*absent* from `latest.json` rather than present-and-broken: a key pointing at an
+artifact that was never built would hand those users a download that 404s,
+whereas an absent key simply means the updater never offers them anything.
+Shipping them needs ARM runners (or cross-compilation) added to the matrix
+first; the manifest job asserts only the four it expects.
 
 (macOS updates from `.app.tar.gz`, not the `.dmg` shown on the release page —
 same as mercs2.)

@@ -14,6 +14,7 @@ import { registerCommands } from '@/services/commands'
 import { handleKeydown } from '@/services/keybindings'
 import { activatePlugins, deactivatePlugins } from '@/services/plugins'
 import { dock } from '@/services/dock'
+import { checkForUpdate } from '@/services/updater'
 import { bundledPlugins } from '@/plugins'
 
 const session = useSessionStore()
@@ -32,6 +33,9 @@ onMounted(() => {
   void projects.load()
   void files.loadExpanded()
   void session.start()
+  // Fire-and-forget: the update prompt must never gate the workbench appearing,
+  // and checkForUpdate resolves rather than throws on every failure path.
+  void checkForUpdate()
 
   // Core, store-only commands. View/editor/terminal commands are contributed by
   // the workbench (where their state lives).

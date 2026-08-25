@@ -37,9 +37,12 @@ log = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tauri-plugin-store = "2"
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
 lancedb = "0.21"
 arrow-array = "55"
 futures = "0.3"
 base64 = "0.22"
 flate2 = "1"
 tar = "0.4"
+
