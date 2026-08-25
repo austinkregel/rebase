@@ -294,7 +294,7 @@ function resolveWriteTarget(ctx: ToolCtx, args: Record<string, unknown>): { abs:
     if (!isValidLeafName(name)) {
       throw new Error(`invalid file name "${name}": must be a single path segment (no "/", "\\", or "..")`)
     }
-    const dirAbs = resolveInRoot(ctx.roots[0], dirArg)
+    const dirAbs = resolveInScope(ctx.roots, dirArg)
     if (!ctx.surfaced.dirs.has(dirAbs)) {
       throw new Error(`refusing to create a file in ${dirArg}: list that directory first`)
     }
@@ -303,7 +303,7 @@ function resolveWriteTarget(ctx: ToolCtx, args: Record<string, unknown>): { abs:
 
   const path = String(args.path ?? '')
   if (!path) throw new Error('write_file needs a `path` (a surfaced file) or a `dir`+`name` (a new file)')
-  const abs = resolveInRoot(ctx.roots[0], path)
+  const abs = resolveInScope(ctx.roots, path)
   // Overwrite an existing surfaced file.
   if (ctx.surfaced.files.has(abs)) return { abs, display: path }
   // Or create a new file addressed by full path — parent must be listed, leaf valid.
@@ -487,11 +487,13 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
       return { output: clip(`(exit ${res.code})\n${out}`) }
     }
     case 'write_file': {
-      const abs = resolveInScope(ctx.roots, str('path'))
+      // #2: confine to the surfaced set — overwrite a file we've read, or create
+      // one in a directory we've listed. Throws (before approval) otherwise.
+      const { abs, display } = resolveWriteTarget(ctx, args)
       const content = str('content')
       const old = await fileService.read(ctx.clientId, abs).catch(() => '')
-      const diff = unifiedDiff(old, content, str('path'))
-      if ((await ctx.approve({ name, summary: `Write ${str('path')}`, diff })) === 'deny') {
+      const diff = unifiedDiff(old, content, display)
+      if ((await ctx.approve({ name, summary: `Write ${display}`, diff })) === 'deny') {
         throw new Error('edit denied by the user')
       }
       await fileService.write(ctx.clientId, abs, content)
@@ -502,6 +504,11 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
     }
     case 'edit_file': {
       const abs = resolveInScope(ctx.roots, str('path'))
+      // #2: you can only edit a file you've surfaced (read/listed) — refuse
+      // before reading or prompting for approval.
+      if (!ctx.surfaced.files.has(abs)) {
+        throw new Error(`refusing to edit ${str('path')}: read the file first`)
+      }
       const oldText = str('old_text')
       const newText = str('new_text')
       const content = await fileService.read(ctx.clientId, abs)

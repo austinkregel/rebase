@@ -43,21 +43,6 @@ vi.mock('@/services/fileService', () => ({
 vi.mock('@/services/crucible', () => ({ retrieve: vi.fn(async () => []) }))
 
 const emptySurfaced = (): Surfaced => ({ files: new Set(), dirs: new Set() })
-
-// runTool talks to the agent through these; stub them so the tests exercise the
-// scope + permission logic, not the transport.
-vi.mock('@/services/fileService', () => ({
-  fileService: {
-    read: vi.fn(async () => 'old content'),
-    write: vi.fn(async () => {}),
-    list: vi.fn(async () => []),
-    exec: vi.fn(async () => ({ code: 0, stdout: '', stderr: '' })),
-    execCancellable: vi.fn(() => ({
-      result: Promise.resolve({ code: 0, stdout: 'ok', stderr: '' }),
-      cancel: () => {},
-    })),
-  },
-}))
 vi.mock('@/services/crucible', () => ({ retrieve: vi.fn(async () => []) }))
 
 describe('resolveInRoot', () => {
@@ -146,6 +131,7 @@ describe('runTool — scope boundary + command permissions are enforced', () => 
     agentCommands: [],
     commandDeny: [],
     rememberCommand: vi.fn(),
+    surfaced: emptySurfaced(),
     approve: vi.fn(async () => 'allow'),
     onCancel: () => {},
     aborted: () => false,
@@ -160,8 +146,9 @@ describe('runTool — scope boundary + command permissions are enforced', () => 
     expect(ctx.approve).not.toHaveBeenCalled()
   })
 
-  it('writes an in-scope path after approval', async () => {
-    const ctx = baseCtx()
+  it('writes an in-scope, surfaced path after approval', async () => {
+    // #2 gates writes to the surfaced set, so seed the target as already-read.
+    const ctx = baseCtx({ surfaced: { files: new Set(['/home/u/proj/src/a.ts']), dirs: new Set() } })
     const out = await runTool('write_file', { path: 'src/a.ts', content: 'new' }, ctx)
     expect(out.output).toMatch(/Wrote/)
     expect(ctx.approve).toHaveBeenCalledTimes(1)
@@ -282,10 +269,12 @@ describe('runTool — surfaced-set authority (#2)', () => {
   const ROOT = '/home/u/proj'
   const baseCtx = (over: Partial<ToolCtx> = {}): ToolCtx => ({
     clientId: 'n',
-    root: ROOT,
+    roots: [ROOT],
     agentCommands: [],
+    commandDeny: [],
+    rememberCommand: vi.fn(),
     surfaced: emptySurfaced(),
-    approve: vi.fn(async () => true),
+    approve: vi.fn(async () => 'allow'),
     onCancel: () => {},
     aborted: () => false,
     ...over,
