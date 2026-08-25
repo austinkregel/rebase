@@ -216,10 +216,11 @@ function commitScale() {
       </span>
 
       <label class="flex flex-col gap-1.5">
-        <span class="text-sm text-fg">Agent commands</span>
+        <span class="text-sm text-fg">Agent commands — allow</span>
         <span class="text-2xs text-subtle">
-          Commands the chat agent may run (one per line, prefix-matched). The agent's own
-          exec allowlist still applies; empty = the agent can run nothing.
+          Commands that run <em>without</em> asking (one per line, prefix-matched). Anything not
+          listed prompts you, with an option to remember it here — like Claude Code. The agent's
+          own exec allowlist still applies.
         </span>
         <textarea
           :value="settings.indexing.agentCommands.join('\n')"
@@ -228,6 +229,24 @@ function commitScale() {
           placeholder="git status&#10;go test&#10;npm test"
           spellcheck="false"
           @change="settings.updateIndexing({ agentCommands: ($event.target as HTMLTextAreaElement).value.split('\n').map((s) => s.trim()).filter(Boolean) })"
+        />
+      </label>
+
+      <label class="flex flex-col gap-1.5">
+        <span class="text-sm text-fg">Agent commands — deny</span>
+        <span class="text-2xs text-subtle">
+          Commands the agent may <em>never</em> run — refused before any prompt (deny wins over
+          allow). One per line, prefix-matched; empty = nothing is force-denied. A shell command
+          isn't confined by its working directory, so this is the lever for anything you want
+          hard-blocked regardless of approval.
+        </span>
+        <textarea
+          :value="settings.indexing.agentCommandsDeny.join('\n')"
+          rows="4"
+          class="w-full resize-y rounded border border-line bg-elevated px-2 py-1 font-mono text-xs text-fg outline-none focus:border-accent"
+          placeholder="rm -rf&#10;curl&#10;sudo"
+          spellcheck="false"
+          @change="settings.updateIndexing({ agentCommandsDeny: ($event.target as HTMLTextAreaElement).value.split('\n').map((s) => s.trim()).filter(Boolean) })"
         />
       </label>
     </div>

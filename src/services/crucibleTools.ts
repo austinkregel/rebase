@@ -1,5 +1,6 @@
 import { fileService } from '@/services/fileService'
 import { retrieve, type Hit } from '@/services/crucible'
+import { isWindowsPath } from '@/services/paths'
 
 /**
  * Crucible agent tools. The chat model calls these (native Ollama tool calling)
@@ -54,12 +55,25 @@ export const READ_ONLY_TOOL_SCHEMAS = TOOL_SCHEMAS.filter(
   (t) => READ_ONLY_TOOLS.has((t as { function: { name: string } }).function.name),
 )
 
+/** A tool-approval outcome. `always` means "and remember this" — session-wide
+ *  for a file action, persisted to the command allowlist for a run_command. */
+export type ApprovalDecision = 'allow' | 'always' | 'deny'
+
 export interface ToolCtx {
   clientId: string
-  root: string
+  /** The project's roots — the scope boundary. Every file path the model
+   *  supplies is confined to the union of these (see `resolveInScope`); the
+   *  first is the primary root used for search/grep cwd. */
+  roots: string[]
+  /** Commands that run without a prompt (Claude Code's allow rules). */
   agentCommands: string[]
-  /** Ask the user to approve a mutating action. Resolves true to proceed. */
-  approve: (a: { name: string; summary: string; diff?: string }) => Promise<boolean>
+  /** Commands refused outright, no prompt (Claude Code's deny rules). */
+  commandDeny?: string[]
+  /** Persist a command prefix to the allowlist after an "allow always". */
+  rememberCommand?: (cmd: string) => void
+  /** Ask the user to approve a mutating action; the decision drives whether it
+   *  proceeds and whether it is remembered. */
+  approve: (a: { name: string; summary: string; diff?: string }) => Promise<ApprovalDecision>
   /** Register a cancel fn for an in-flight cancellable op (run_command). */
   onCancel: (cancel: () => void) => void
   /** Whether the loop was stopped (checked before long ops). */
@@ -115,13 +129,89 @@ export function toolSummary(name: string, args: Record<string, unknown>): string
   }
 }
 
-/** True when `cmd` matches the per-agent allowlist (prefix, token-aware). */
-export function isAgentCommandAllowed(cmd: string, allow: string[]): boolean {
+/** True when `cmd` matches a prefix list at a token boundary. Shared by the
+ *  allow and deny checks — identical matching, opposite meaning. */
+function commandMatches(cmd: string, list: string[]): boolean {
   const c = cmd.trim()
-  return allow.some((entry) => {
+  return list.some((entry) => {
     const t = entry.trim()
     return !!t && (c === t || c.startsWith(t + ' '))
   })
+}
+
+/** True when `cmd` matches the per-agent allowlist (prefix, token-aware). */
+export function isAgentCommandAllowed(cmd: string, allow: string[]): boolean {
+  return commandMatches(cmd, allow)
+}
+
+/** True when `cmd` matches a deny rule — refused outright, no prompt. */
+export function isAgentCommandDenied(cmd: string, deny: string[]): boolean {
+  return commandMatches(cmd, deny)
+}
+
+/** Whether `abs` is `root` itself or lives beneath it. Both must already be
+ *  normalized (forward slashes, no trailing slash); `fold` case-folds on Windows
+ *  where paths are case-insensitive, and is identity elsewhere. */
+function within(root: string, abs: string, fold: (s: string) => string): boolean {
+  const r = fold(root)
+  const a = fold(abs)
+  return a === r || a.startsWith(r + '/')
+}
+
+/** Last segment of a normalized (forward-slash) path. Unlike `paths.baseName`,
+ *  this assumes forward slashes, so it splits a normalized Windows root
+ *  (`C:/Users/x` → `x`) that the OS-aware helper would leave whole. */
+function lastSegment(normalized: string): string {
+  return normalized.slice(normalized.lastIndexOf('/') + 1)
+}
+
+/** Normalize an absolute path and refuse `..`, so `/proj/../etc` cannot slip
+ *  past a containment check. */
+function cleanAbsolute(p: string): string {
+  const s = p.replace(/\\/g, '/')
+  const winDrive = /^[A-Za-z]:/.test(s)
+  const parts = s.split('/')
+  const head = winDrive ? (parts.shift() ?? '') : ''
+  const out: string[] = []
+  for (const seg of parts) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') throw new Error(`path escapes the project scope: ${p}`)
+    out.push(seg)
+  }
+  const joined = out.join('/')
+  return winDrive ? `${head}/${joined}`.replace(/\/+$/, '') : `/${joined}`.replace(/\/+$/, '') || '/'
+}
+
+/**
+ * Resolve a model-supplied path within a project's **root set** — the agent
+ * scope boundary. The result is guaranteed to sit inside one of `roots`, or this
+ * throws. Three cases:
+ *  - **Absolute path** — accepted only if contained by some root (so the model
+ *    *can* reach any root explicitly, but `/etc/passwd` is refused).
+ *  - **`<root-basename>/…`** — a relative path whose first segment names a root's
+ *    basename resolves under that root (how the model reaches a non-primary root
+ *    in a multi-root project).
+ *  - **plain relative** — resolves under the primary root, `..` rejected.
+ */
+export function resolveInScope(roots: string[], rel: string): string {
+  if (!roots.length) throw new Error('the project has no roots in scope')
+  // Any Windows-style root switches the whole set to Windows semantics:
+  // case-insensitive matching (paths there are case-insensitive).
+  const win = roots.some(isWindowsPath)
+  const fold = (s: string) => (win ? s.toLowerCase() : s)
+  const norm = roots.map((r) => r.replace(/\\/g, '/').replace(/\/+$/, ''))
+
+  if (rel.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rel)) {
+    const abs = cleanAbsolute(rel)
+    if (norm.some((r) => within(r, abs, fold))) return abs
+    throw new Error(`path is outside the project scope: ${rel}`)
+  }
+
+  const segs = rel.replace(/\\/g, '/').split('/').filter((s) => s && s !== '.')
+  const named = segs.length ? norm.find((r) => fold(lastSegment(r)) === fold(segs[0])) : undefined
+  // resolveInRoot enforces the no-`..`/no-absolute invariant within the chosen
+  // base, and the base is one of the roots, so the result is in scope.
+  return named ? resolveInRoot(named, segs.slice(1).join('/')) : resolveInRoot(norm[0], rel)
 }
 
 /** Resolve a model-supplied relative path under `root`, rejecting escapes. */
@@ -169,7 +259,7 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
 
   switch (name) {
     case 'read_file': {
-      const abs = resolveInRoot(ctx.root, str('path'))
+      const abs = resolveInScope(ctx.roots, str('path'))
       const content = await fileService.read(ctx.clientId, abs)
       const start = num('start_line')
       const end = num('end_line')
@@ -181,12 +271,12 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
       return { output: clip(content) }
     }
     case 'list_files': {
-      const abs = resolveInRoot(ctx.root, str('path'))
+      const abs = resolveInScope(ctx.roots, str('path'))
       const entries = await fileService.list(ctx.clientId, abs)
       return { output: entries.map((e) => `${e.type === 'dir' ? '📁' : '  '} ${e.name}`).join('\n') || '(empty)' }
     }
     case 'search_code': {
-      const hits: Hit[] = await retrieve(ctx.clientId, ctx.root, str('query'), num('k') ?? 8)
+      const hits: Hit[] = await retrieve(ctx.clientId, ctx.roots[0], str('query'), num('k') ?? 8)
       return {
         output:
           hits
@@ -197,7 +287,7 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
     case 'grep': {
       const max = num('max') ?? 50
       const cmd = `rg --line-number --no-heading --max-count ${max} -- ${str('pattern')}`
-      const res = await fileService.exec(ctx.clientId, cmd, ctx.root, { timeoutSec: 60, timeoutMs: 65_000 })
+      const res = await fileService.exec(ctx.clientId, cmd, ctx.roots[0], { timeoutSec: 60, timeoutMs: 65_000 })
       if (res.code !== 0 && !res.stdout) {
         // rg exits 1 on "no matches" — report that rather than erroring.
         return { output: res.code === 1 ? 'No matches.' : (res.stderr || res.error || `grep exit ${res.code}`).trim() }
@@ -206,14 +296,22 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
     }
     case 'run_command': {
       const command = str('command')
-      if (!isAgentCommandAllowed(command, ctx.agentCommands)) {
-        throw new Error(`command not permitted for the agent: "${command}" (not in the agent command allowlist)`)
+      // Claude Code's permission model: deny rules win outright; allow rules run
+      // without a prompt; anything else asks, and "allow always" remembers the
+      // prefix. A shell command is NOT confined by the cwd — say so in the prompt.
+      if (isAgentCommandDenied(command, ctx.commandDeny ?? [])) {
+        throw new Error(`command blocked by the project's deny rules: "${command}"`)
       }
-      if (!(await ctx.approve({ name, summary: `Run \`${command}\`` }))) {
-        throw new Error('command denied by the user')
+      if (!isAgentCommandAllowed(command, ctx.agentCommands)) {
+        const decision = await ctx.approve({
+          name,
+          summary: `Run \`${command}\`  ⚠ a shell command can reach outside the project`,
+        })
+        if (decision === 'deny') throw new Error('command denied by the user')
+        if (decision === 'always') ctx.rememberCommand?.(command)
       }
       if (ctx.aborted()) throw new Error('stopped')
-      const cwd = str('cwd') ? resolveInRoot(ctx.root, str('cwd')) : ctx.root
+      const cwd = str('cwd') ? resolveInScope(ctx.roots, str('cwd')) : ctx.roots[0]
       const { result, cancel } = fileService.execCancellable(ctx.clientId, command, cwd, {
         timeoutSec: 15 * 60,
         timeoutMs: 15 * 60 * 1000 + 5_000,
@@ -224,11 +322,11 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
       return { output: clip(`(exit ${res.code})\n${out}`) }
     }
     case 'write_file': {
-      const abs = resolveInRoot(ctx.root, str('path'))
+      const abs = resolveInScope(ctx.roots, str('path'))
       const content = str('content')
       const old = await fileService.read(ctx.clientId, abs).catch(() => '')
       const diff = unifiedDiff(old, content, str('path'))
-      if (!(await ctx.approve({ name, summary: `Write ${str('path')}`, diff }))) {
+      if ((await ctx.approve({ name, summary: `Write ${str('path')}`, diff })) === 'deny') {
         throw new Error('edit denied by the user')
       }
       await fileService.write(ctx.clientId, abs, content)
@@ -236,7 +334,7 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
       return { output: `Wrote ${content.length} bytes to ${str('path')}`, diff }
     }
     case 'edit_file': {
-      const abs = resolveInRoot(ctx.root, str('path'))
+      const abs = resolveInScope(ctx.roots, str('path'))
       const oldText = str('old_text')
       const newText = str('new_text')
       const content = await fileService.read(ctx.clientId, abs)
@@ -245,7 +343,7 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
       }
       const updated = content.replace(oldText, newText)
       const diff = unifiedDiff(content, updated, str('path'))
-      if (!(await ctx.approve({ name, summary: `Edit ${str('path')}`, diff }))) {
+      if ((await ctx.approve({ name, summary: `Edit ${str('path')}`, diff })) === 'deny') {
         throw new Error('edit denied by the user')
       }
       await fileService.write(ctx.clientId, abs, updated)

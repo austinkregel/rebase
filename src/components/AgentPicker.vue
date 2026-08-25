@@ -4,6 +4,7 @@ import { Dialog, DialogPanel } from '@headlessui/vue'
 import { ServerStackIcon, PlusIcon, MagnifyingGlassIcon, XMarkIcon } from '@heroicons/vue/20/solid'
 import { useAgentsStore } from '@/stores/agents'
 import { useSessionStore } from '@/stores/session'
+import { useProjectsStore } from '@/stores/projects'
 import type { PublicClient } from '@/transport/types'
 import { openContextMenu } from '@/services/contextMenu'
 import { menuItemsFor } from '@/services/menus'
@@ -15,20 +16,32 @@ import Button from './ui/Button.vue'
 
 const agents = useAgentsStore()
 const session = useSessionStore()
+const projects = useProjectsStore()
 
 const search = ref('')
 const addServerOpen = ref(false)
 
 const filteredAgents = computed(() => {
   const q = search.value.trim().toLowerCase()
-  if (!q) return agents.sortedAgents
-  return agents.sortedAgents.filter(
-    (a) =>
-      (a.hostname || '').toLowerCase().includes(q) ||
-      a.clientId.toLowerCase().includes(q) ||
-      (a.platform || '').toLowerCase().includes(q),
-  )
+  const list = !q
+    ? [...agents.sortedAgents]
+    : agents.sortedAgents.filter(
+        (a) =>
+          (a.hostname || '').toLowerCase().includes(q) ||
+          a.clientId.toLowerCase().includes(q) ||
+          (a.platform || '').toLowerCase().includes(q),
+      )
+  // In project mode, pin the focused project's server to the top.
+  const focused = projects.focused?.clientId
+  if (focused) list.sort((a, b) => (a.clientId === focused ? -1 : 0) - (b.clientId === focused ? -1 : 0))
+  return list
 })
+
+// In project mode, the servers other than the project's are dimmed — present and
+// clickable, clearly not the one you're working on.
+function dim(clientId: string): boolean {
+  return projects.inProjectMode && clientId !== projects.focused?.clientId
+}
 
 function pick(agent: PublicClient) {
   session.selectAgent(agent.clientId === session.activeClientId ? null : agent.clientId)
@@ -91,8 +104,8 @@ const alertInfo = computed(() => (clientId: string) => {
       <button
         v-for="agent in filteredAgents"
         :key="agent.clientId"
-        class="flex w-full items-start gap-2 px-3 py-1.5 text-left text-muted hover:bg-hover"
-        :class="{ 'bg-active text-fg': agent.clientId === session.activeClientId }"
+        class="flex w-full items-start gap-2 px-3 py-1.5 text-left text-muted transition-opacity hover:bg-hover"
+        :class="{ 'bg-active text-fg': agent.clientId === session.activeClientId, 'opacity-40 hover:opacity-100': dim(agent.clientId) }"
         @click="pick(agent)"
         @contextmenu.prevent="serverMenu($event, agent)"
       >

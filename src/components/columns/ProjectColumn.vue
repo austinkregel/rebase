@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, markRaw, type Component, type FunctionalComponent } from 'vue'
+import { computed, markRaw, onBeforeUnmount, onMounted, ref, watch, type Component, type FunctionalComponent } from 'vue'
 import { TabGroup, TabList, Tab, TabPanels, TabPanel } from '@headlessui/vue'
 import {
   DocumentDuplicateIcon as DocumentDuplicateIconOutline,
@@ -7,6 +7,7 @@ import {
 } from '@heroicons/vue/24/outline'
 import { DocumentDuplicateIcon, Cog6ToothIcon } from '@heroicons/vue/20/solid'
 import { viewsFor } from '@/services/views'
+import { shell } from '@/services/shell'
 import FileTree from '../FileTree.vue'
 import EditorSettingsForm from '../EditorSettingsForm.vue'
 
@@ -38,19 +39,45 @@ const ideTab: TabEntry = {
 
 const tabs = computed<TabEntry[]>(() => [
   filesTab,
-  ...viewsFor('sidebar.project').map((v) => ({
-    id: v.id,
-    label: v.title,
-    icon: v.icon,
-    iconActive: v.iconActive ?? v.icon,
-    component: v.component,
-  })),
+  ...viewsFor('sidebar.project')
+    .filter((v) => v.visible?.() ?? true)
+    .map((v) => ({
+      id: v.id,
+      label: v.title,
+      icon: v.icon,
+      iconActive: v.iconActive ?? v.icon,
+      component: v.component,
+    })),
   ideTab,
 ])
+
+// The TabGroup is *controlled* so a store action (enterProjectMode) can select
+// the Project tab through the shell bridge. Headless UI is otherwise uncontrolled
+// and nothing outside it could switch tabs.
+const selectedIndex = ref(0)
+
+// When a conditional tab disappears (leaving project mode) the selected index can
+// fall off the end or onto a different tab; clamp it back to the Files tab.
+watch(
+  () => tabs.value.length,
+  (len) => {
+    if (selectedIndex.value >= len) selectedIndex.value = 0
+  },
+)
+
+onMounted(() => {
+  shell.focusProjectTab = (viewId: string) => {
+    const i = tabs.value.findIndex((t) => t.id === viewId)
+    if (i >= 0) selectedIndex.value = i
+  }
+})
+onBeforeUnmount(() => {
+  if (shell.focusProjectTab) shell.focusProjectTab = null
+})
 </script>
 
 <template>
-  <TabGroup as="div" class="flex h-full min-h-0 flex-col bg-surface">
+  <TabGroup as="div" :selected-index="selectedIndex" class="flex h-full min-h-0 flex-col bg-surface" @change="selectedIndex = $event">
     <TabList class="flex flex-shrink-0 border-b border-line">
       <Tab v-for="t in tabs" :key="t.id" v-slot="{ selected }" as="template">
         <button

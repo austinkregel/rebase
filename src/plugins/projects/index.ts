@@ -1,13 +1,17 @@
 import { markRaw } from 'vue'
-import { BeakerIcon as BeakerOutline } from '@heroicons/vue/24/outline'
-import { BeakerIcon } from '@heroicons/vue/20/solid'
+import {
+  BeakerIcon as BeakerOutline,
+  ViewfinderCircleIcon as ViewfinderOutline,
+} from '@heroicons/vue/24/outline'
+import { BeakerIcon, ViewfinderCircleIcon } from '@heroicons/vue/20/solid'
 import { definePlugin } from '@/services/plugins'
 import type { FileMenuContext } from '@/services/menus'
 import type { ContextMenuItem } from '@/services/contextMenu'
-import { useProjectsStore } from '@/stores/projects'
+import { useProjectsStore, PROJECT_FOCUS_VIEW } from '@/stores/projects'
 import { useSessionStore } from '@/stores/session'
 import { baseName, normalizeRoot } from '@/services/paths'
 import ProjectsManager from '@/components/ProjectsManager.vue'
+import ProjectFocus from '@/components/panels/ProjectFocus.vue'
 
 // The projects/workspaces feature as a bundled plugin: contributes the Project
 // explorer view (column 2) and the "Add folder to a project" items on the file
@@ -24,6 +28,19 @@ export default definePlugin({
       iconActive: BeakerIcon,
       order: 10,
       component: markRaw(ProjectsManager),
+    })
+
+    // The Project (IDE) focus tab — shown only while in project mode, and
+    // auto-selected on entry via the shell bridge (see enterProjectMode).
+    ctx.registerView({
+      id: PROJECT_FOCUS_VIEW,
+      location: 'sidebar.project',
+      title: 'Project',
+      icon: ViewfinderOutline,
+      iconActive: ViewfinderCircleIcon,
+      order: 20,
+      visible: () => useProjectsStore().inProjectMode,
+      component: markRaw(ProjectFocus),
     })
 
     // Bridge from ad-hoc file browsing to the workspace: add a folder to any

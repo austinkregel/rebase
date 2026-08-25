@@ -105,6 +105,10 @@ export const useSessionStore = defineStore('session', {
       socket.close()
       this.selectedControlPlane = null
       this.activeClientId = null
+      // Leave project mode — the project's server is gone. Dynamic import avoids
+      // a static cycle (the projects store imports this one).
+      const { useProjectsStore } = await import('./projects')
+      useProjectsStore().exitProjectMode()
       await platform.logout().catch(() => {})
       await this.refreshAuth()
     },

@@ -34,10 +34,14 @@ import {
   parseToolCall,
   runTool,
   toolSummary,
+  type ApprovalDecision,
   type ToolCtx,
 } from '@/services/crucibleTools'
 
 export type { ChatPin }
+// The approval contract lives with the tools; re-exported so the chat UI (which
+// imports it from here) needn't reach into crucibleTools.
+export type { ApprovalDecision }
 
 /**
  * Crucible chat — a Cursor-style **agent**. The model calls tools (read/search/
@@ -60,6 +64,9 @@ export interface ChatStepResult {
   toolCalls: unknown[]
   /** Stopped mid-stream. `content` still holds whatever the user already saw. */
   cancelled?: boolean
+  /** Cut off because the model ran away repeating a short unit (missing stop
+   *  token / flaky parser). `content` is trimmed of the repeated tail. */
+  degenerated?: boolean
 }
 
 export interface StreamOptions {
@@ -110,7 +117,7 @@ class OllamaProvider implements ChatProvider {
       void invoke('crucible_chat_cancel', { requestId }).catch(() => {})
     })
 
-    const res = await invoke<{ content: string; tool_calls: unknown[]; cancelled: boolean }>(
+    const res = await invoke<{ content: string; tool_calls: unknown[]; cancelled: boolean; degenerated: boolean }>(
       'crucible_chat',
       {
         ollama: opts.ollama,
@@ -128,6 +135,7 @@ class OllamaProvider implements ChatProvider {
       content: res.content,
       toolCalls: res.tool_calls ?? [],
       cancelled: res.cancelled === true,
+      degenerated: res.degenerated === true,
     }
   }
 }
@@ -326,8 +334,6 @@ export async function newConversation(pid: string): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
-export type ApprovalDecision = 'allow' | 'always' | 'deny'
-
 interface ActiveLoop {
   projectId: string
   aborted: boolean
@@ -415,7 +421,10 @@ export function buildMessages(
  */
 export async function ask(project: Project, userText: string, pins: ChatPin[]): Promise<void> {
   const text = userText.trim()
-  const root = project.rootPaths[0]
+  // `roots` is the agent's scope boundary; `root` (the primary) is the cwd for
+  // retrieval/grep and the fallback base for relative paths.
+  const roots = project.rootPaths
+  const root = roots[0]
   if (!text || !root) return
   // Never run two loops at once: the second would append turns inside the first's
   // `beforeCount` window and both would persist overlapping slices. The UI also
@@ -436,7 +445,7 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
   const loop: ActiveLoop = { projectId: pid, aborted: false, cancels: new Set() }
   activeLoop = loop
 
-  const { ollamaUrl, chatModel, agentCommands, numCtxMax } = useSettingsStore().indexing
+  const { ollamaUrl, chatModel, agentCommands, agentCommandsDeny, numCtxMax } = useSettingsStore().indexing
   // Hoisted out of the try so the catch can mark the turn that was in flight.
   let lastAssistantId = ''
 
@@ -469,6 +478,18 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
 
     const systemPrompt = SYSTEM_PROMPTS[chatOptions.mode]
     const messages = buildMessages(priorTurns, text, hits, pinContents, systemPrompt)
+    // Make the model aware of a multi-root project's boundary: how to address a
+    // non-primary root, and that anything outside the set is refused.
+    if (roots.length > 1) {
+      messages.splice(1, 0, {
+        role: 'system',
+        content:
+          'This project spans multiple roots. Use a path relative to the primary root, ' +
+          '`<root-folder-name>/…` to reach another root, or an absolute path inside one. ' +
+          'You are confined to these roots — anything outside is refused:\n' +
+          roots.map((r) => `- ${r}`).join('\n'),
+      })
+    }
     const tools =
       chatOptions.mode === 'agent' || chatOptions.mode === 'multi-task'
         ? TOOL_SCHEMAS
@@ -482,7 +503,7 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
       const assistant = appendTurn(pid, { role: 'assistant', text: '', streaming: true })
       lastAssistantId = assistant.id
       let acc = ''
-      const { content, toolCalls, cancelled } = await provider.chat(
+      const { content, toolCalls, cancelled, degenerated } = await provider.chat(
         messages,
         {
           ollama: ollamaUrl,
@@ -508,6 +529,18 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
         text: cancelled ? acc : content || acc,
       })
 
+      // The model ran away repeating itself and was cut off. Surface it loudly
+      // (the transcript already shows the trimmed content) and stop the turn —
+      // never fall through to running tools off a degenerate response.
+      if (degenerated) {
+        appendSystemNote(
+          pid,
+          '⚠ Stopped: the model began repeating itself (likely a missing stop token). ' +
+            'Add a `PARAMETER stop` to the model, or switch chat model in settings.',
+        )
+        break
+      }
+
       // `cancelled` is not redundant with `aborted`: a cancel that didn't come
       // from `stop()` (a timeout, or a phase abort once the pipeline lands) would
       // otherwise fall through as "the model finished normally".
@@ -526,14 +559,23 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
 
         const ctx: ToolCtx = {
           clientId,
-          root,
+          roots,
           agentCommands,
+          commandDeny: agentCommandsDeny,
+          // "Allow always" on a command persists its prefix to the allowlist, so
+          // the same shape never re-prompts — Claude Code's remembered rules.
+          rememberCommand: (cmd) => {
+            const trimmed = cmd.trim()
+            const s = useSettingsStore()
+            const cur = s.indexing.agentCommands
+            if (trimmed && !cur.includes(trimmed)) void s.updateIndexing({ agentCommands: [...cur, trimmed] })
+          },
           aborted: () => loop.aborted,
           onCancel: (cancel) => loop.cancels.add(cancel),
           onEdit: () => setIndexState(pid, { phase: 'stale' }),
-          approve: async ({ name: n, summary, diff }) => {
+          approve: async ({ name: n, summary, diff }): Promise<ApprovalDecision> => {
             const key = `${n}:${summary}`
-            if (sessionApproved.has(key)) return true
+            if (sessionApproved.has(key)) return 'allow'
             updateToolCall(pid, assistant.id, callId, { status: 'awaiting', diff })
             const decision = await new Promise<ApprovalDecision>((resolve) =>
               pendingApprovals.set(callId, resolve),
@@ -542,10 +584,10 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
             if (decision === 'always') sessionApproved.add(key)
             if (decision === 'deny') {
               updateToolCall(pid, assistant.id, callId, { status: 'denied' })
-              return false
+              return 'deny'
             }
             updateToolCall(pid, assistant.id, callId, { status: 'running' })
-            return true
+            return decision
           },
         }
 

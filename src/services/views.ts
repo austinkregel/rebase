@@ -15,6 +15,10 @@ export interface ViewContribution {
   /** Optional filled/active icon (the project column uses outline→solid). */
   iconActive?: FunctionalComponent
   order?: number
+  /** Optional visibility predicate — a tab present only in some app state (e.g.
+   *  the Project focus tab, shown only in project mode). Evaluated by consumers
+   *  inside a computed, so it must read reactive state to update live. */
+  visible?: () => boolean
   component: Component
 }
 

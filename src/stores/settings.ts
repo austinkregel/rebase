@@ -24,6 +24,14 @@ export interface IndexingSettings {
    */
   agentCommands: string[]
   /**
+   * Commands the agent may NEVER run, refused before a prompt is even shown
+   * (Claude Code's deny rules — deny wins over allow). Prefix-matched like
+   * `agentCommands`; empty means nothing is force-denied. There is no default
+   * denylist: a cwd doesn't sandbox a shell, so this is the operator's lever for
+   * the handful of commands they want hard-blocked regardless of approval.
+   */
+  agentCommandsDeny: string[]
+  /**
    * Ceiling on the context window Crucible requests from Ollama, in tokens.
    * 0 uses the built-in cap (`MAX_NUM_CTX`). Raise it if you have the memory —
    * Ollama sizes the KV cache from this, so it is the difference between a
@@ -38,6 +46,7 @@ const defaultIndexing: IndexingSettings = {
   embedModel: 'nomic-embed-text',
   chatModel: 'qwen2.5-coder',
   agentCommands: ['git status', 'git diff', 'git log', 'ls', 'cat', 'rg', 'grep', 'go test', 'npm test', 'cargo test'],
+  agentCommandsDeny: [],
   numCtxMax: 0,
 }
 

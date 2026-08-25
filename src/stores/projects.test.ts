@@ -121,3 +121,77 @@ describe('projects store — multi-root', () => {
     expect(projects.projects[0].clientId).toBe('c1')
   })
 })
+
+describe('projects store — project (IDE) mode', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    for (const k of Object.keys(saved)) delete saved[k]
+  })
+
+  it('enter opens the project and turns the mode on; exit keeps it open', async () => {
+    const projects = useProjectsStore()
+    const p = await projects.create({ name: 'a', controlPlane: null, clientId: 'n', rootPaths: ['/a'] })
+    projects.enterProjectMode(p.id)
+    expect(projects.inProjectMode).toBe(true)
+    expect(projects.focused?.id).toBe(p.id)
+    expect(projects.activeId).toBe(p.id) // entering implies opening
+
+    projects.exitProjectMode()
+    expect(projects.inProjectMode).toBe(false)
+    expect(projects.focused).toBeNull()
+    expect(projects.activeId).toBe(p.id) // still open for a look
+  })
+
+  it('enter ignores an unknown id', () => {
+    const projects = useProjectsStore()
+    projects.enterProjectMode('nope')
+    expect(projects.inProjectMode).toBe(false)
+  })
+
+  it('toggle enters the active project, then exits it', async () => {
+    const projects = useProjectsStore()
+    const p = await projects.create({ name: 'a', controlPlane: null, clientId: 'n', rootPaths: ['/a'] })
+    projects.open(p.id) // sets activeId without focusing
+    projects.toggleProjectMode()
+    expect(projects.focused?.id).toBe(p.id)
+    projects.toggleProjectMode()
+    expect(projects.inProjectMode).toBe(false)
+  })
+
+  it('toggle with a different id switches focus rather than exiting', async () => {
+    const projects = useProjectsStore()
+    const a = await projects.create({ name: 'a', controlPlane: null, clientId: 'n', rootPaths: ['/a'] })
+    const b = await projects.create({ name: 'b', controlPlane: null, clientId: 'n', rootPaths: ['/b'] })
+    projects.enterProjectMode(a.id)
+    projects.toggleProjectMode(b.id)
+    expect(projects.focused?.id).toBe(b.id)
+  })
+
+  it('persists focusedId across a reload, dropping it if the project is gone', async () => {
+    const projects = useProjectsStore()
+    const p = await projects.create({ name: 'a', controlPlane: null, clientId: 'n', rootPaths: ['/a'] })
+    projects.enterProjectMode(p.id)
+
+    setActivePinia(createPinia())
+    const fresh = useProjectsStore()
+    await fresh.load()
+    expect(fresh.focusedId).toBe(p.id)
+    expect(fresh.inProjectMode).toBe(true)
+
+    // Now simulate the project having been deleted out from under a stale UI blob.
+    saved['projects'] = []
+    setActivePinia(createPinia())
+    const gone = useProjectsStore()
+    await gone.load()
+    expect(gone.focusedId).toBeNull()
+  })
+
+  it('deleting the focused project drops the mode', async () => {
+    const projects = useProjectsStore()
+    const p = await projects.create({ name: 'a', controlPlane: null, clientId: 'n', rootPaths: ['/a'] })
+    projects.enterProjectMode(p.id)
+    await projects.remove(p.id)
+    expect(projects.inProjectMode).toBe(false)
+    expect(projects.focusedId).toBeNull()
+  })
+})

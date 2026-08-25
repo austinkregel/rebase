@@ -48,6 +48,14 @@ function refreshGit() {
       {{ session.socketStatus === 'open' ? '●' : '○' }} {{ session.socketStatus }}
     </span>
     <span v-if="session.selectedControlPlane">{{ session.selectedControlPlane.name }}</span>
+    <button
+      v-if="projects.inProjectMode"
+      class="flex items-center gap-1 text-accent hover:opacity-80"
+      title="In project mode — click to exit"
+      @click="projects.exitProjectMode()"
+    >
+      ◆ {{ projects.focused?.name }}
+    </button>
     <span>{{ agent ? agent.hostname || agent.clientId : 'no server' }}</span>
     <span v-if="rtt" title="round-trip latency to the control plane">ping {{ rtt }}</span>
 

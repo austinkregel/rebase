@@ -15,8 +15,9 @@ import IconButton from './ui/IconButton.vue'
 import { useFilesStore, type OpenFile } from '@/stores/files'
 import { useSessionStore } from '@/stores/session'
 import { useAgentsStore } from '@/stores/agents'
+import { useProjectsStore } from '@/stores/projects'
 import { dock, type OpenTerminalOptions } from '@/services/dock'
-import { loadValueMigrating, saveValue } from '@/services/store'
+import { loadValue, loadValueMigrating, saveValue } from '@/services/store'
 import { setActiveTerminal } from '@/services/terminals'
 import { registerCommands } from '@/services/commands'
 import { viewsFor } from '@/services/views'
@@ -24,8 +25,15 @@ import { viewsFor } from '@/services/views'
 const files = useFilesStore()
 const session = useSessionStore()
 const agents = useAgentsStore()
+const projects = useProjectsStore()
 
 const toolTabs = computed(() => viewsFor('sidebar.tools'))
+
+// Collapsed servers rail: in project mode, dim every server that isn't the
+// focused project's — visible and still clickable, clearly not what you're on.
+function railDim(clientId: string): boolean {
+  return projects.inProjectMode && clientId !== projects.focused?.clientId
+}
 
 // --- Hover flyouts for the collapsed sidebars ---
 const toolsHover = ref(false)
@@ -75,6 +83,25 @@ watch([widths, serversOpen, toolsOpen], () => {
   })
 })
 
+// Project mode collapses the servers column to its rail; leaving restores it to
+// whatever it was. Save-and-restore, not a hard true on exit: someone who works
+// with it collapsed all day shouldn't have it thrown open for leaving a project.
+// Only the mode transition touches it, so expanding by hand mid-mode stays sticky.
+let serversOpenBeforeFocus: boolean | null = null
+watch(
+  () => projects.inProjectMode,
+  (on) => {
+    if (on) {
+      serversOpenBeforeFocus = serversOpen.value
+      serversOpen.value = false
+    } else if (serversOpenBeforeFocus !== null) {
+      serversOpen.value = serversOpenBeforeFocus
+      serversOpenBeforeFocus = null
+    }
+  },
+  { immediate: true },
+)
+
 function startDrag(target: 'servers' | 'project' | 'tools', e: MouseEvent) {
   const startX = e.clientX
   const startW = widths[target]
@@ -101,6 +128,19 @@ const tabComponents = {
 }
 const LAYOUT_KEY = 'editor.v2'
 const LAYOUT_LEGACY_KEY = 'rebase.editor.v2'
+
+/** Persistence key for the current editor layout. In project mode each project
+ *  keeps its own (`editor.v2:<id>`) so switching projects restores that
+ *  project's tabs instead of the shared fleet set. */
+function layoutKey(id: string | null = projects.focusedId): string {
+  return id ? `${LAYOUT_KEY}:${id}` : LAYOUT_KEY
+}
+function loadLayoutFor(id: string | null): Promise<object | null> {
+  return id
+    ? loadValue<object | null>(layoutKey(id), null)
+    : loadValueMigrating<object | null>(LAYOUT_KEY, LAYOUT_LEGACY_KEY, null)
+}
+
 const dockApi = shallowRef<DockviewApi | null>(null)
 const editorIds = new Set<string>()
 let editorGroupId: string | null = null
@@ -137,12 +177,17 @@ function openTerminal(opts?: OpenTerminalOptions) {
   if (!api) return
   const clientId = opts?.clientId ?? session.activeClientId
   if (!clientId) return
+  // In project mode, a terminal on the project's own server opens at its primary
+  // root and is titled with the project. Guarded on clientId so a terminal opened
+  // against another host isn't cd'd into a path that doesn't exist there.
+  const inProject = projects.inProjectMode && clientId === projects.focused?.clientId
+  const initialCwd = opts?.initialCwd ?? (inProject ? projects.primaryRoot ?? undefined : undefined)
   const seq = ++terminalSeq
   api.addPanel({
     id: `terminal-${seq}`,
     component: 'terminal',
-    title: `Terminal ${seq}`,
-    params: { clientId, seq, initialCwd: opts?.initialCwd },
+    title: inProject ? `Terminal ${seq} · ${projects.focused?.name}` : `Terminal ${seq}`,
+    params: { clientId, seq, initialCwd },
     position:
       editorGroupId && api.getGroup(editorGroupId)
         ? { referenceGroup: editorGroupId as string, direction: 'below' }
@@ -157,7 +202,7 @@ async function onReady(event: DockviewReadyEvent) {
   // fromJSON fires onDidLayoutChange as it rebuilds; with an async read the
   // handler is already live, so guard the write or a half-built layout is what
   // gets saved.
-  const saved = await loadValueMigrating<object | null>(LAYOUT_KEY, LAYOUT_LEGACY_KEY, null)
+  const saved = await loadLayoutFor(projects.focusedId)
   if (saved) {
     hydratingLayout = true
     try {
@@ -191,7 +236,7 @@ async function onReady(event: DockviewReadyEvent) {
   api.onDidLayoutChange(() => {
     editorEmpty.value = api.panels.length === 0
     if (hydratingLayout) return
-    void saveValue(LAYOUT_KEY, api.toJSON())
+    void saveValue(layoutKey(), api.toJSON())
   })
 
   dock.openTerminal = openTerminal
@@ -218,9 +263,54 @@ watch(
   () => {
     const api = dockApi.value
     if (!api) return
+    // In project mode the per-project layout owns the tabs — don't wipe them
+    // just because glancing at a neighbouring server changed the active agent.
+    // The focusedId watcher below handles clearing/restoring on a real switch.
+    if (projects.inProjectMode) return
     for (const id of [...editorIds]) {
       const panel = api.getPanel(id)
       if (panel) api.removePanel(panel)
+    }
+  },
+)
+
+// Per-project editor layout: entering, leaving, or switching the focused project
+// persists the layout we're leaving under its own key, then clears and rehydrates
+// the one we're entering. `editor.v2:<id>` (a project) and `editor.v2` (fleet)
+// each keep their own tab set. Save-before-clear is why the activeClientId
+// watcher above must not wipe first — in project mode it doesn't.
+watch(
+  () => projects.focusedId,
+  async (newId, oldId) => {
+    const api = dockApi.value
+    if (!api) return
+    if (!hydratingLayout) void saveValue(layoutKey(oldId), api.toJSON())
+    hydratingLayout = true
+    try {
+      api.clear()
+      editorIds.clear()
+      editorGroupId = null
+      const saved = await loadLayoutFor(newId)
+      if (saved) {
+        try {
+          api.fromJSON(saved as Parameters<typeof api.fromJSON>[0])
+        } catch {
+          api.clear()
+        }
+      }
+      for (const p of api.panels) {
+        if (p.id.startsWith('terminal-')) {
+          const n = Number(p.id.split('-')[1] ?? 0)
+          if (n > terminalSeq) terminalSeq = n
+        } else {
+          editorIds.add(p.id)
+          editorGroupId = p.group?.id ?? editorGroupId
+        }
+      }
+    } finally {
+      hydratingLayout = false
+      editorEmpty.value = api.panels.length === 0
+      void saveValue(layoutKey(newId), api.toJSON())
     }
   },
 )
@@ -291,7 +381,7 @@ onBeforeUnmount(() => disposeWorkbenchCommands?.())
           v-for="agent in agents.sortedAgents"
           :key="agent.clientId"
           class="flex size-[26px] items-center justify-center rounded transition-colors hover:bg-hover"
-          :class="agent.clientId === session.activeClientId ? 'bg-active' : ''"
+          :class="[agent.clientId === session.activeClientId ? 'bg-active' : '', { 'opacity-40 hover:opacity-100': railDim(agent.clientId) }]"
           :title="agent.hostname || agent.clientId"
           @click="session.selectAgent(agent.clientId === session.activeClientId ? null : agent.clientId)"
         >
