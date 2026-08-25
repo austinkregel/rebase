@@ -506,28 +506,17 @@ where
     })
 }
 
-/// One chat step against Ollama. Forwards content tokens over the channel as they
-/// stream, and returns the final assistant message (content + tool_calls). When
-/// `tools` is provided, the model may return tool_calls instead of (or with) text.
-///
-/// `num_ctx` matters more than it looks: without it Ollama uses the *modelfile's*
-/// context window (commonly 4096) whatever the model actually supports, and
-/// silently drops the oldest tokens — so any budgeting we do up-stack is fiction
-/// unless the window we budgeted against is the one we sent.
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn crucible_chat(
-    ollama: String,
-    model: String,
-    messages: Vec<ChatMessage>,
+/// Assemble the `/api/chat` request body. Split out from `crucible_chat` so the
+/// framing — especially the `format` passthrough — is testable without a live
+/// Ollama or a Tauri `State`.
+fn build_chat_body(
+    model: &str,
+    messages: &[ChatMessage],
     tools: Option<serde_json::Value>,
-    request_id: Option<String>,
     temperature: Option<f32>,
     num_ctx: Option<u32>,
-    format: Option<String>,
-    on_token: Channel<String>,
-    cancels: State<'_, Arc<ChatCancels>>,
-) -> Result<ChatResult, String> {
+    format: Option<serde_json::Value>,
+) -> serde_json::Value {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -548,11 +537,13 @@ pub async fn crucible_chat(
     if let Some(t) = tools {
         body["tools"] = t;
     }
-    // `format: "json"` constrains the model to emit a single JSON object, which is
-    // what the planner/validator/post-validator roles want. It removes most of the
-    // "model wrapped its JSON in prose" parse failures at the source.
+    // `format` is either the string `"json"` (constrain to a single JSON object)
+    // or a full JSON *schema* object — Ollama's structured outputs, backed by
+    // llama.cpp GBNF, so the sampler physically can't emit tokens that violate it.
+    // We pass whichever the caller sent through unchanged (Crucible's Phase-B
+    // argument synthesis hands us a per-tool schema).
     if let Some(f) = format {
-        body["format"] = serde_json::json!(f);
+        body["format"] = f;
     }
     let mut options = serde_json::Map::new();
     if let Some(t) = temperature {
@@ -564,6 +555,32 @@ pub async fn crucible_chat(
     if !options.is_empty() {
         body["options"] = serde_json::Value::Object(options);
     }
+    body
+}
+
+/// One chat step against Ollama. Forwards content tokens over the channel as they
+/// stream, and returns the final assistant message (content + tool_calls). When
+/// `tools` is provided, the model may return tool_calls instead of (or with) text.
+///
+/// `num_ctx` matters more than it looks: without it Ollama uses the *modelfile's*
+/// context window (commonly 4096) whatever the model actually supports, and
+/// silently drops the oldest tokens — so any budgeting we do up-stack is fiction
+/// unless the window we budgeted against is the one we sent.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn crucible_chat(
+    ollama: String,
+    model: String,
+    messages: Vec<ChatMessage>,
+    tools: Option<serde_json::Value>,
+    request_id: Option<String>,
+    temperature: Option<f32>,
+    num_ctx: Option<u32>,
+    format: Option<serde_json::Value>,
+    on_token: Channel<String>,
+    cancels: State<'_, Arc<ChatCancels>>,
+) -> Result<ChatResult, String> {
+    let body = build_chat_body(&model, &messages, tools, temperature, num_ctx, format);
 
     // Arm cancellation before the request goes out, so a Stop that lands during
     // connect/headers is honoured rather than deferred.
@@ -991,6 +1008,32 @@ mod tests {
             assert_eq!(cancels.len(), 1);
         }
         assert_eq!(cancels.len(), 0, "a completed chat must not leak its sender");
+    }
+
+    #[test]
+    fn build_chat_body_passes_a_json_schema_format_through_unchanged() {
+        // A per-tool argument schema (the Phase-B grammar) must reach Ollama's
+        // `format` verbatim — the whole point of widening it from a string.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "path": { "enum": ["src/a.ts", "src/b.ts"] } },
+            "required": ["path"],
+        });
+        let body = build_chat_body("m", &[], None, None, None, Some(schema.clone()));
+        assert_eq!(body["format"], schema, "schema object round-trips into the body");
+    }
+
+    #[test]
+    fn build_chat_body_still_accepts_the_string_json_format() {
+        // The legacy `format: "json"` path (a plain string) must keep working.
+        let body = build_chat_body("m", &[], None, None, None, Some(serde_json::json!("json")));
+        assert_eq!(body["format"], serde_json::json!("json"));
+    }
+
+    #[test]
+    fn build_chat_body_omits_format_when_none() {
+        let body = build_chat_body("m", &[], None, None, None, None);
+        assert!(body.get("format").is_none(), "no format key when unset");
     }
 
     #[test]

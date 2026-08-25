@@ -20,6 +20,7 @@ import {
   activeConversationIdFor,
   setConversationList,
   setActiveConversationId,
+  surfacedFor,
   type ChatPin,
   type ChatRole,
   type ChatTurn,
@@ -31,10 +32,13 @@ import {
   TOOL_SCHEMAS,
   READ_ONLY_TOOL_SCHEMAS,
   READ_ONLY_TOOLS,
+  argSchemaFor,
+  needsArgSynthesis,
   parseToolCall,
   runTool,
   toolSummary,
   type ApprovalDecision,
+  type JsonSchema,
   type ToolCtx,
 } from '@/services/crucibleTools'
 
@@ -81,8 +85,12 @@ export interface StreamOptions {
    * done up-stack is only real if the same window is sent here.
    */
   numCtx?: number
-  /** `'json'` constrains the reply to a single JSON object. */
-  format?: 'json'
+  /**
+   * Constrains the reply. `'json'` forces a single JSON object; a JSON *schema*
+   * object (Ollama structured outputs, GBNF-backed) forces the reply to match it
+   * token-by-token — used for Phase-B argument synthesis (see `ask`).
+   */
+  format?: 'json' | object
   /**
    * Registers a canceller for this step. `stop()` calls it, which aborts the
    * HTTP stream in Rust — without this, Stop only stopped *rendering* tokens
@@ -415,6 +423,52 @@ export function buildMessages(
 }
 
 /**
+ * Phase B — grammar-locked argument synthesis. A second generation with
+ * `format = schema` (the chosen tool's per-step schema), so the authority fields
+ * come back valid *by construction*: the sampler can't emit a target the
+ * conversation hasn't surfaced. Selection stays with Phase A's native tool call;
+ * only the args are re-derived here.
+ *
+ * Returns the parsed argument object. Throws if the model/Ollama can't honor the
+ * schema (structured outputs need Ollama ≥ 0.5) or returns unparseable JSON — the
+ * caller then falls back to Phase A's draft, which `runTool`'s #2 checks still
+ * gate deterministically (validate-only degrade).
+ */
+async function synthesizeArgs(
+  toolName: string,
+  schema: JsonSchema,
+  messages: ChatMessage[],
+  opts: { ollama: string; model: string; numCtx?: number; onCancel: (cancel: () => void) => void },
+): Promise<Record<string, unknown>> {
+  const synthMessages: ChatMessage[] = [
+    ...messages,
+    {
+      role: 'user',
+      content:
+        `Emit ONLY a JSON object with the arguments for the \`${toolName}\` tool — ` +
+        'no prose, no tool call, just the argument object.',
+    },
+  ]
+  const { content } = await provider.chat(
+    synthMessages,
+    {
+      ollama: opts.ollama,
+      model: opts.model,
+      numCtx: opts.numCtx,
+      // Deterministic: the authority fields are enums, there's nothing to sample
+      // creatively over, and a stable pick is what we want.
+      temperature: 0,
+      format: schema as object,
+      onCancel: opts.onCancel,
+    },
+    () => {},
+  )
+  const parsed: unknown = JSON.parse(content)
+  if (!parsed || typeof parsed !== 'object') throw new Error('Phase-B synthesis returned a non-object')
+  return parsed as Record<string, unknown>
+}
+
+/**
  * Run the agent loop for one user message: gather context, then repeatedly call
  * the model — executing any tools it requests (live in the feed) and feeding
  * results back — until it answers, hits the iteration cap, or is stopped.
@@ -495,6 +549,11 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
         ? TOOL_SCHEMAS
         : READ_ONLY_TOOL_SCHEMAS
 
+    // The conversation's surfaced set — what reads/lists have revealed. Threaded
+    // into every ToolCtx: reads populate it, mutations gate on it, and Phase-B
+    // schemas are generated from it (see below).
+    const surfaced = surfacedFor(pid)
+
     let consecutiveFailures = 0
 
     for (let iter = 0; iter < MAX_ITERS; iter++) {
@@ -550,7 +609,29 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
       messages.push({ role: 'assistant', content, tool_calls: toolCalls })
       for (const raw of toolCalls) {
         if (loop.aborted) break
-        const { name, args } = parseToolCall(raw)
+        // Phase A gave us the tool NAME (native selection). Phase B re-derives the
+        // ARGS under a grammar when — and only when — a constrained (enum) field
+        // in the draft is missing/invalid; otherwise we keep the draft (adaptive,
+        // so the extra round-trip is paid only when the model got an authority arg
+        // wrong). The schema is generated fresh from the live `surfaced` set, so a
+        // read earlier in this same batch already counts.
+        const { name, args: draftArgs } = parseToolCall(raw)
+        let args = draftArgs
+        const schema = argSchemaFor(name, surfaced)
+        if (schema && !loop.aborted && needsArgSynthesis(schema, draftArgs)) {
+          try {
+            args = await synthesizeArgs(name, schema, messages, {
+              ollama: ollamaUrl,
+              model: chatModel,
+              numCtx,
+              onCancel: (cancel) => loop.cancels.add(cancel),
+            })
+          } catch {
+            // Structured outputs unavailable / bad JSON: fall back to the draft.
+            // runTool's #2 checks still gate the mutation deterministically.
+            args = draftArgs
+          }
+        }
         const callId = appendToolCall(pid, assistant.id, {
           name,
           summary: toolSummary(name, args),
@@ -561,6 +642,7 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
           clientId,
           roots,
           agentCommands,
+          surfaced,
           commandDeny: agentCommandsDeny,
           // "Allow always" on a command persists its prefix to the allowlist, so
           // the same shape never re-prompts — Claude Code's remembered rules.
