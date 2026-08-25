@@ -7,3 +7,6 @@ src-tauri/target/
 vendor/
 target/
 hot
+
+# Signing keys — the private half lives in CI secrets, never in git.
+*.key

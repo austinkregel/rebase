@@ -1,42 +1,77 @@
-# Project mode
+# Project mode — the IDE mode
 
-A focus mode for the workbench. Outside it you are looking at a *fleet* — every
-linked server, every saved project, the whole control plane. Inside it you are
-looking at *one project on one server*, and the shell gets out of the way.
+The primary way to work on a project. Outside it you are looking at a *fleet* —
+every linked server, every saved project, the whole control plane. Inside it the
+app is an **IDE scoped to one project on one server**: the file tree, git, chat,
+completion, terminals, and editor layout all resolve against that single project,
+and a scope boundary keeps the agent from reaching outside it.
 
-The mode is pure UI state. It changes nothing about the protocol, adds no new
-events, and is not visible to the control plane or the agent.
+The mode is local app behaviour — Tauri + Vue. It changes **nothing** about the
+transport, the `{event, data}` protocol, or the connection architecture, adds no
+new events, and is invisible to the control plane and the agent. It also adds no
+new navigation paradigm: it reuses the tabs, columns, and stores that already
+exist. The only new surfaces are one column-2 tab and one status-tray segment.
 
 ## The two modes
 
-|                   | Fleet mode (today)                          | Project mode                                        |
-| ----------------- | ------------------------------------------- | --------------------------------------------------- |
-| Servers column    | expanded, all agents + telemetry             | collapsed to the rail, project's server only        |
-| Column 2          | Files / Projects / IDE settings              | + **Focus** tab, auto-selected                        |
-| Projects list     | every project, every server                  | the focused one expanded, rest behind "show all"    |
-| Editor tabs       | one global Dockview layout                   | layout saved per project                            |
-| New terminals     | shell's default cwd                          | project's primary root                              |
-| Status tray       | server · ping · git                          | `◆ project` segment, click to exit                  |
+|                   | Fleet mode (the shell)                      | Project (IDE) mode                                   |
+| ----------------- | ------------------------------------------- | ---------------------------------------------------- |
+| Servers column    | expanded, all agents + telemetry             | collapsed to the rail, the project's server only     |
+| Column 2          | Files / Projects / IDE settings              | + **Project** tab, auto-selected                      |
+| Projects list     | every project, every server                  | the open one expanded, rest still listed             |
+| Editor tabs       | one global Dockview layout                   | layout saved per project                             |
+| New terminals     | shell's default cwd                          | the project's primary root, titled with the project  |
+| Chat / agent      | the active project's primary root            | **locked** to the project's server + root set        |
+| Agent file scope  | one root, `..`/absolute rejected             | the **union of the project's roots**, else refused   |
+| Status tray       | server · ping · git                          | `◆ project` segment, click to exit                   |
 
-Project mode is a **soft** focus, not a lock. The servers rail stays on screen
-with a single dot; clicking it expands the full list with the project's server
-pinned and the others dimmed. Nothing becomes unreachable — glancing at a
-neighbouring host does not force you out of the mode. A hard lock reads as
-tidier in a mockup and as a dead end in practice, the first time a build breaks
-because a different box ran out of disk.
+Project mode is a **soft** focus, not a lock on the *connection*. The servers
+rail stays on screen with a single dot; clicking it expands the full list.
+Nothing on the network becomes unreachable — glancing at a neighbouring host does
+not force you out of the mode. What *is* hard is the **agent scope boundary**
+(below): the chat agent cannot read or write outside the project's roots even
+while you can still look at other hosts by hand.
+
+## Entering and leaving
+
+Deliberately few doors. Entering is an explicit act — you *open* a project — not
+something a stray click does.
+
+**Two ways in, and only two:**
+
+- **Double-click** a project row in the Projects list.
+- **Right-click** a project row → **Open**.
+
+Both call `enterProjectMode(p.id)`. A plain single-click keeps its current
+meaning (preview: set `activeId`, select the agent, expand roots inline) — it
+does **not** enter the mode. This is why `activeId` and `focusedId` stay separate
+(see State): opening for a look and committing to the IDE are different intents.
+
+**Ways out:**
+
+- The **`◆ project` status-tray segment** — always visible while in the mode;
+  click it to exit. This is the primary escape hatch and the "you are in a mode"
+  signal.
+- The **exit button** in the Project tab header.
+- Implicitly on `logout()` and when the focused project is deleted.
+
+No command-palette entries and no keybinding for now — the existing navigation is
+sufficient, and two obvious doors beat six subtle ones. (A `⌘⇧O` toggle is a
+trivial later addition against the same `toggleProjectMode` action if it's ever
+wanted.)
 
 ## State
 
-A project is already bound to exactly one server (`Project.clientId`), so
-"which server" needs no separate answer. The mode adds one field.
+A project is already bound to exactly one server (`Project.clientId`), so "which
+server" needs no separate answer. The mode adds one field.
 
 `stores/projects.ts`:
 
 ```ts
 state: {
   projects: Project[]
-  activeId: string | null       // which project is open in the list (unchanged)
-  focusedId: string | null      // NEW — non-null means project mode
+  activeId: string | null       // which project is "open for a look" (unchanged)
+  focusedId: string | null      // NEW — non-null means we are in IDE mode
   expandedIds: Set<string>
 }
 
@@ -46,16 +81,15 @@ getters: {
 }
 ```
 
-`focusedId` persists into the existing `ProjectsUi` blob (`projects-ui`)
-alongside `activeId` and `expandedIds`, and is dropped on load if the project no
-longer exists — same guard the other two already use.
+`focusedId` persists into the existing `ProjectsUi` blob (`projects-ui`) beside
+`activeId` and `expandedIds`, and is dropped on load if the project no longer
+exists — the same guard the other two already use.
 
 `activeId` and `focusedId` stay separate on purpose. `activeId` answers "which
-project do Crucible, git status, and the file tree resolve against" and is set by
-plain single-click in the list. `focusedId` answers "is the shell in focus
-mode". Entering implies opening (`focusedId` set ⇒ `activeId` set to the same
-id), but opening does not imply entering. Collapsing them into one field would
-mean every click in the Projects list re-arranges the whole window.
+project do the file tree and inline preview resolve against" and is set by a
+single click. `focusedId` answers "are we in IDE mode, scoped and guarded".
+Entering implies opening (`focusedId` set ⇒ `activeId` set to the same id), but
+opening does not imply entering.
 
 ### Actions
 
@@ -66,18 +100,61 @@ toggleProjectMode(id?: string) // id ?? activeId ?? focusedId
 ```
 
 `enterProjectMode` reuses `open()` verbatim — it already selects the agent,
-persists UI state, and kicks a git refresh against the primary root.
+persists UI state, and kicks a git refresh against the primary root. It then also
+selects the project's own server explicitly (see the scope boundary: the agent's
+`clientId` must be the *project's*, not whatever was last active).
 
-## Shell wiring
+## The Project tab
 
-The mode's *consequences* live in the shell, not in the store: the store never
-reaches into Workbench refs. Two directions of plumbing are needed, one of which
-requires a small refactor.
+A fourth entry in column 2's tab strip, present only when `inProjectMode`, and
+auto-selected on entry. It is *not* the Projects list with a filter — it answers
+"what is the state of the project I am in", not "which project do I want".
 
-### Servers column (watch, downward)
+```
+[files] [projects] [◆ project] [gear]
+──────────────────────────────────────
+ ◆ rebase                       [exit]
+   Mnemosyne  ●  cpu 2%  mem 19%
+   main ↑2 · 3 changed
+   scope: 2 roots · agent confined ⓘ
+──────────────────────────────────────
+ ▾ rebase/
+   ▸ src/
+   ▸ docs/
+ ▾ rebase-indexer/
+   ▸ src/
+```
 
-`Workbench.vue` owns `serversOpen` in a local ref persisted to
-`rebase.frame.v1`. Add a watcher:
+Top to bottom:
+
+- **Project name** + exit button. Inline rename via the existing `InlineInput`.
+- **The one server**, as a compact telemetry row (not the full card) — you want
+  to notice it going red, not to monitor it.
+- **Git**, from the existing `git` store against the primary root; a root
+  switcher only when `rootPaths.length > 1`.
+- **Scope line** — how many roots the agent is confined to, with a tooltip
+  listing them. This is the visible face of the guardrail (below).
+- **The roots as trees**, reusing `FileTreeItem` exactly as `ProjectsManager`
+  does today, minus the project-row wrapper.
+
+New file: `src/components/panels/ProjectFocus.vue`, registered by the projects
+plugin (`src/plugins/projects/index.ts`) as a second `registerView` with
+`location: 'sidebar.project'` and an `order` after Projects — consistent with how
+the Projects tab itself is contributed, so no new hardcoded tab in
+`ProjectColumn.vue`. The tab strip is icon-only, so the Project tab needs a
+distinct icon (e.g. `ViewfinderCircleIcon`, outline/solid pair) that doesn't
+collide with the folder, beaker, and gear.
+
+## Shell consequences
+
+The mode's *consequences* live in the shell, not in the store — the store never
+reaches into Workbench refs. Five of them.
+
+### 1. Servers column collapses
+
+`Workbench.vue` owns `serversOpen`, persisted in the frame blob under `frame.v1`
+(legacy fallback `rebase.frame.v1`). A watcher saves-and-restores it across the
+mode transition:
 
 ```ts
 let serversOpenBeforeFocus: boolean | null = null
@@ -93,130 +170,34 @@ watch(() => projects.inProjectMode, (on) => {
 ```
 
 Save-and-restore rather than a hard `true` on exit: someone who works with the
-servers column collapsed all day should not have it thrown open at them for
-leaving a project. The user can still expand the column by hand while in the
-mode — the watcher only fires on the mode transition, so that stays sticky.
+column collapsed all day should not have it thrown open for leaving a project.
+The user can still expand it by hand while in the mode — the watcher only fires on
+the transition, so that stays sticky. The collapsed rail filters its dots to the
+focused project's server (with the others still one click away), and
+`AgentPicker.vue` pins that server to the top and dims the rest at `opacity-50`.
 
-The collapsed rail (`Workbench.vue`, the `v-else` branch) filters its dots:
+### 2. Per-project editor layout
 
-```ts
-const railAgents = computed(() =>
-  projects.inProjectMode
-    ? agents.sortedAgents.filter(a => a.clientId === projects.focused?.clientId)
-    : agents.sortedAgents,
-)
-```
-
-`AgentPicker.vue` sorts the focused project's server to the top and dims the
-rest at `opacity-50` when `inProjectMode` — visible, still clickable, clearly
-not what you are working on.
-
-### Column 2 tab selection (capability, upward)
-
-`ProjectColumn.vue` uses an *uncontrolled* Headless UI `TabGroup`, so nothing
-outside it can select a tab. This is the one real refactor: bind
-`:selected-index` / `@change` to a local ref, and expose a focus call through a
-`dock.ts`-style bridge, matching the pattern the Workbench already uses for
-terminals:
-
-```ts
-// services/shell.ts (new)
-export const shell = reactive<{
-  focusProjectTab: ((id: string) => void) | null
-}>({ focusProjectTab: null })
-```
-
-`ProjectColumn` registers it on mount; `enterProjectMode` calls
-`shell.focusProjectTab?.('focus')`. No-op until registered, exactly like
-`dock.openTerminal`.
-
-## The Focus tab
-
-A fourth entry in column 2's tab strip, present only when `inProjectMode` (the
-tab list is already a computed array, so this is a conditional spread). It is
-*not* the Projects list with a filter applied — it is a different view answering
-a different question: not "which project do I want" but "what is the state of
-the one I am in".
-
-```
-[files] [projects] [◆ focus] [gear]
-──────────────────────────────────
- ◆ rebase                   [exit]
-   Mnemosyne  ●  cpu 2%  mem 19%
-   main ↑2 · 3 changed
-──────────────────────────────────
- ▾ rebase/
-   ▸ src/
-   ▸ docs/
- ▾ rebase-indexer/
-   ▸ src/
-```
-
-Contents, top to bottom:
-
-- **Project name** + exit button. Rename inline via the existing `InlineInput`.
-- **The one server**, as a compact `ServerTelemetry` row rather than the full
-  card — you want to notice it going red, not to monitor it.
-- **Git**, from the existing `git` store against the primary root; a root
-  switcher only when `rootPaths.length > 1`.
-- **The roots as trees**, reusing `FileTreeItem` exactly as `ProjectsManager`
-  does today, minus the project-row wrapper.
-
-New file: `src/components/panels/ProjectFocus.vue`. Registered by the projects
-plugin (`src/plugins/projects/index.ts`) as a second `registerView` with
-`location: 'sidebar.project'`, `order: 20` — no new hardcoded tab in
-`ProjectColumn`, consistent with how the Projects tab itself is contributed.
-
-The tab strip is icon-only today, so the Focus tab needs a distinct icon —
-`ViewfinderCircleIcon` (outline/solid pair) reads as "focus" without colliding
-with the existing folder, beaker, and gear.
-
-## Entering and exiting
-
-Multiple doors, one destination:
-
-- **Projects list** — double-click a project row, or "Enter Project Mode" in the
-  row's context menu (`projectMenu` in `ProjectsManager.vue`, above "Rename"),
-  or a viewfinder `IconButton` that appears on row hover.
-- **Command palette** — `workspace.enterProjectMode`,
-  `workspace.exitProjectMode`, `workspace.toggleProjectMode`, category
-  `Workspace`. Registered in `Workbench.vue` next to the existing `view.*`
-  commands. `enter` is `isEnabled: () => !!projects.activeId`.
-- **Keybinding** — `⌘⇧F` for toggle. `⌘B` / `⌘J` are taken by the two sidebars;
-  keep the mode on a shift-chord so it does not feel like another panel toggle.
-- **Status tray** — in project mode, a `◆ rebase` segment left of the server
-  name; click exits. This is the always-visible "you are in a mode" signal, and
-  the escape hatch when the column-2 tab is not on screen.
-- **Exit** also happens implicitly on `logout()` (clear `focusedId`).
-
-## Per-project editor layout
-
-Today `Workbench.vue` saves one Dockview layout under `rebase.editor.v2`, and
-wipes every editor panel when `activeClientId` changes. Entering a project
-changes the agent, so today's behaviour already closes your tabs — you just do
-not get them back.
-
-Key the layout by project instead:
+Today `Workbench.vue` saves one Dockview layout under `editor.v2` (legacy
+fallback `rebase.editor.v2`) and wipes every editor panel when `activeClientId`
+changes. Entering a project changes the agent, so today's behaviour already
+closes your tabs — you just don't get them back. Key the layout by project:
 
 ```ts
 const layoutKey = () => (projects.focusedId ? `editor.v2:${projects.focusedId}` : 'editor.v2')
 ```
 
-Both the layout and the frame now persist through `services/store.ts` rather
-than raw `localStorage`, which is what makes this sound: on desktop the layout
-lands in `rebase.json` beside the `projects` array it is keyed on, so the key
-and its referent share a lifetime and `projects.remove()` can prune orphans
-without reaching across into webview storage.
+On a mode transition: serialize to the *old* key, `api.clear()`, then hydrate
+from the new one. The existing `onDidLayoutChange` handler writes to
+`layoutKey()`. Both layout and frame persist through `services/store.ts`, so on
+desktop the layout lands in the store beside the `projects` array it is keyed on,
+and `projects.remove()` prunes the orphaned `editor.v2:<id>` key.
 
-On mode transition: serialize to the *old* key, `api.clear()`, then hydrate from
-the new one. The existing `onDidLayoutChange` handler writes to `layoutKey()`.
-This turns project mode from a visual filter into something with memory — leave
-`rebase`, work in `Homelab`, come back and your five tabs are where you left
-them. Prune keys for deleted projects in `projects.remove()`.
+### 3. Terminals default to the project root
 
-## Terminals
-
-`dock.openTerminal` already accepts `initialCwd`. In project mode, default it:
+`dock.openTerminal` already accepts `initialCwd`. In project mode, default it —
+guarded so a terminal explicitly opened against another host is not `cd`'d into a
+path that doesn't exist there:
 
 ```ts
 const clientId = opts?.clientId ?? session.activeClientId
@@ -226,64 +207,153 @@ const initialCwd = opts?.initialCwd
       : undefined)
 ```
 
-Guarded on `clientId` matching so a terminal explicitly opened against another
-host does not get `cd`'d into a path that does not exist there. Title the panel
-`Terminal N · <project>` in the mode.
+Title the panel `Terminal N · <project>` in the mode.
 
-## Files tab: unchanged, on purpose
+### 4. Status-tray segment
 
-The obvious move is to have `enterProjectMode` point `browseRoot` at the
-project's primary root, so the Files tab "follows" the project. Don't.
+`StatusTray.vue` / `StatusItems.vue` gain a `◆ <project>` segment, left of the
+server name, shown only when `inProjectMode`. Click exits. This is the
+always-visible mode signal and the escape hatch when the column-2 tab is off
+screen.
 
-The whole point of a dedicated Focus tab is that the project's roots have a
-home. If Files also shows those roots, the two tabs collide: one of them is
-redundant, and the user has to remember which one is the project and which one
-is wherever they last browsed. Keeping them distinct gives each tab a single
-clear job — **Focus** is the project, **Files** is the ad-hoc filesystem browser
-you use to *find* the next root to add. That is also the existing contract
-(`projects.open()` deliberately leaves `browseRoot` alone), so project mode
-changes nothing here.
+### 5. Chat scoped and locked (leads into the guardrail)
 
-`session.selectAgent()` still resets `browseRoot` to the platform default when
-the agent changes, which is fine: entering a project puts you at that server's
-root in Files and at the project's roots in Focus.
+Today `CrucibleChat.vue` binds to `projects.active`, resolves its root as
+`rootPaths[0]`, and addresses `session.activeClientId`. In project mode it binds
+to `projects.focused`, and — critically — the agent's `clientId` is **locked to
+`project.clientId`**, not to whatever agent happens to be active. See below.
+
+## Project scope boundary (the guardrail)
+
+The point of an "IDE mode" is confidence: ask the agent to build something and
+know it will touch **only this project's files on this project's host** — not a
+sibling project, not another server, not `/etc` or `/root`, unless a project root
+explicitly includes that path.
+
+### What already exists
+
+The chat agent's tools (`services/crucibleTools.ts`) already run every path
+through `resolveInRoot(root, rel)`, which **rejects absolute paths and any `..`
+escape**. `ToolCtx` already carries a single `root` and `clientId`. So today's
+chat is already confined — but to *one* root (`rootPaths[0]`) on
+`session.activeClientId`. The gap for a multi-root project on its own server is
+small and mechanical.
+
+### The three changes
+
+1. **Lock the server.** In project mode, `ToolCtx.clientId = project.clientId`,
+   full stop — never `session.activeClientId`. The user can browse another host
+   in the servers rail without the agent following them there.
+
+2. **Widen the boundary to the root set.** Replace the single `ToolCtx.root` with
+   the project's `rootPaths`, resolved by the new `resolveInScope(roots, rel)`: a
+   model-supplied path resolves under whichever root it names (or the primary
+   root for a bare relative path), and is **refused if the resolved absolute path
+   is not contained by any project root**. Containment is a normalized prefix
+   check on cleaned paths (trailing slash stripped, `..` rejected), not a raw
+   `startsWith`, so `/proj/../etc` and `/project-evil` can't sneak past
+   `/project`. Windows roots (drive letters, backslashes) are handled — the check
+   folds case and normalizes slashes when any root is Windows-style — because the
+   release builds ship a Windows target, so this is exercised, not hypothetical.
+
+3. **Refuse, visibly.** An out-of-scope path throws a clear tool error the model
+   sees (`path is outside the project scope: <p>`), and the attempt surfaces in
+   the chat feed like any other tool call — so a blocked reach is *observable*,
+   not silent. The Project tab's scope line names how many roots are in bounds.
+
+### Honest trust boundary
+
+This is a **client-side mediation gate**, and it is worth being precise about what
+that does and does not buy:
+
+- It is enforced because **the app is what turns the model's tool calls into
+  protocol requests**. The read/write/edit tools cannot emit an out-of-scope path
+  because `resolveInRoot` refuses to build one. Against the agent as driven by
+  this app, the file boundary is real and hard.
+- It is **not** a server- or agent-enforced sandbox. The control plane and agent
+  will still honour any in-protocol request; a different client, or a bug that
+  bypasses `resolveInRoot`, is not stopped by this. Server-side path scoping is a
+  future hardening, out of scope here (it would be a protocol/agent change, which
+  this mode explicitly is not).
+- **`run_command` is not sandboxed by cwd.** Setting a command's working dir to a
+  project root does not stop `cat /etc/shadow` or `rm -rf ~`. A shell is a shell.
+  So we govern it the way **Claude Code** governs Bash — a permission model, not a
+  jail:
+  - **Deny rules win.** An agent *deny* list (`settings.indexing.agentCommandsDeny`,
+    prefix patterns, edited in Settings ▸ Indexing) refuses a matching command
+    outright — no prompt, no override.
+  - **Allow rules run silently.** A command matching the *allow* list
+    (`settings.indexing.agentCommands`) runs without a prompt — that is what
+    "allowlisted" means.
+  - **Everything else asks, and offers to remember.** A command matched by
+    neither list prompts the user with **Allow once / Allow always / Deny**.
+    "Allow always" persists the command's prefix into the allow list so the same
+    shape never re-prompts — exactly Claude Code's "don't ask again for `npm
+    run test:*`" behaviour. This replaces today's hard *throw* on a
+    non-allowlisted command (a dead end the model can't recover from) with an
+    interactive grant.
+
+  The approval prompt states plainly that a shell command can reach outside the
+  project — we do not imply the cwd confines it.
+
+The doc's claim, stated exactly: **file reads, writes, and edits by the chat
+agent are hard-confined to the project's roots; shell commands follow a Claude
+Code–style allow / deny / ask-with-remember permission model, not the path
+boundary.** That is the guarantee we make and the one we don't.
 
 ## Edge cases
 
-- **Server drops.** `socket.onStatus('closed')` nulls `activeClientId` and
-  resets the files store. Project mode must *survive* this — dropping out of the
-  mode on a flaky connection is worse than the connection. Show an inline banner
-  in the Focus tab ("Mnemosyne is offline — reconnecting"), and add a watcher on
-  the agents list that re-selects the focused project's `clientId` when it
-  reappears in `client_list`.
+- **Server drops.** `socket` close nulls `activeClientId` and resets the files
+  store. Project mode must *survive* this — dropping out on a flaky connection is
+  worse than the connection. Show an inline banner in the Project tab
+  ("Mnemosyne is offline — reconnecting") and re-select the focused project's
+  `clientId` when it reappears in `client_list`. (This dovetails with the
+  clientId-drift auto-heal already in `ProjectsManager.vue`.)
 - **Focused project deleted.** `projects.remove()` already clears `activeId`;
-  clear `focusedId` too, which drops the mode.
+  clear `focusedId` too (drops the mode) and prune its `editor.v2:<id>` layout.
 - **Project with zero roots.** `startNewProject` creates projects with
-  `rootPaths: []`. The Focus tab shows the "Add Directory…" affordance in place
-  of the trees rather than an empty void.
-- **Multi-window / desktop.** `focusedId` lives in the same store layer as the
-  rest (`services/store.ts`, tauri-plugin-store on desktop), so the mode is
-  per-install, not per-window. Fine for now; worth revisiting if the desktop app
-  ever opens a second window.
+  `rootPaths: []`. The Project tab shows an "Add directory…" affordance instead
+  of an empty void, and the agent scope is empty — every file tool refuses until
+  a root exists, which is the correct, safe default.
+- **Case/id drift on the project's server.** The scope lock uses
+  `project.clientId`; the auto-heal watcher keeps that pointing at the live agent,
+  so entering a project whose server re-registered still binds to the right host.
 
 ## Files touched
 
-| File                                          | Change                                                        |
-| --------------------------------------------- | ------------------------------------------------------------- |
-| `src/stores/projects.ts`                      | `focusedId`, `focused`, `inProjectMode`, enter/exit/toggle    |
-| `src/services/shell.ts`                       | **new** — `focusProjectTab` bridge                             |
-| `src/components/columns/ProjectColumn.vue`    | controlled `TabGroup`, register the bridge                     |
-| `src/components/panels/ProjectFocus.vue`      | **new** — the Focus tab                                        |
-| `src/plugins/projects/index.ts`               | register the Focus view + the enter menu item                  |
-| `src/components/Workbench.vue`                | servers watcher, rail filter, per-project layout key, commands |
-| `src/components/AgentPicker.vue`              | pin + dim in project mode                                      |
-| `src/components/ProjectsManager.vue`          | enter affordances, collapse others                             |
-| `src/components/StatusTray.vue`               | `◆ project` segment + exit                                     |
-| `src/services/dock.ts` / Workbench            | terminal `initialCwd` default                                  |
-| `src/services/keybindings.ts`                 | `⌘⇧F`                                                          |
-| `src/stores/projects.test.ts`                 | enter/exit, persistence, delete-while-focused                  |
+| File                                          | Change                                                                    |
+| --------------------------------------------- | ------------------------------------------------------------------------- |
+| `src/stores/projects.ts`                      | `focusedId`, `focused`, `inProjectMode`, enter/exit/toggle, persist, prune |
+| `src/services/shell.ts`                       | **new** — the `focusProjectTab` bridge                                    |
+| `src/components/panels/ProjectFocus.vue`      | **new** — the Project (IDE) tab, incl. the scope line                     |
+| `src/services/views.ts`                       | optional `visible?()` predicate on a view                                 |
+| `src/components/columns/ProjectColumn.vue`    | controlled `TabGroup`, filter hidden views, register the bridge           |
+| `src/plugins/projects/index.ts`               | register the Project view (`visible: inProjectMode`)                       |
+| `src/components/ProjectsManager.vue`          | `@dblclick` → enter; context-menu **Open** enters the mode                |
+| `src/components/Workbench.vue`                | servers watcher, rail dim, per-project `layoutKey`, terminal cwd/title     |
+| `src/components/AgentPicker.vue`              | pin + dim the focused server in project mode                              |
+| `src/components/StatusTray.vue`               | `◆ project` segment + exit                                                |
+| `src/services/dock.ts`                        | terminal `initialCwd` (already present; now defaulted in Workbench)       |
+| `src/services/crucibleTools.ts`               | `ToolCtx.roots`; `resolveInScope`; deny helper; run_command permission flow |
+| `src/services/crucibleChat.ts`               | pass `roots` + deny + `rememberCommand`; decision-returning approval        |
+| `src/stores/settings.ts`                      | `agentCommandsDeny` (deny rules)                                           |
+| `src/components/EditorSettingsForm.vue`       | allow/deny command lists in Settings ▸ Indexing (allow copy updated)      |
+| `src/stores/session.ts`                       | `logout()` exits project mode                                             |
+| `src/stores/projects.test.ts`                 | enter/exit/toggle, persistence, delete-while-focused                      |
+| `src/services/crucibleTools.test.ts`          | multi-root containment (in-scope passes, out-of-scope refused), deny rules |
 
 Design-system notes: the whole tab is built from `components/ui/` primitives
 (`SectionHeader`, `IconButton`, `Badge`, `InlineInput`) and the four `@theme`
-type steps — project name at `text-sm`, the server/git metadata line at
-`text-xs`, no new sizes.
+type steps — project name at `text-sm`, server/git/scope metadata at `text-xs`,
+no new sizes.
+
+## Build order
+
+1. **State** — `focusedId` + getters + actions + persistence, with tests. Inert
+   until something reads it.
+2. **Entry + tab** — `ProjectFocus.vue`, the two doors (`@dblclick`, context
+   **Open**), the status-tray segment. The mode is now enterable and visible.
+3. **Guardrail** — `ToolCtx.roots`, multi-root `resolveInRoot`, clientId lock,
+   the scope line + refusal, with tests. This is the load-bearing safety work.
+4. **Shell polish** — per-project layout, servers collapse/dim, terminal cwd.
+   Each is independent and can land in any order.
