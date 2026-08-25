@@ -87,6 +87,20 @@ export interface ChatPin {
   clientId: string
 }
 
+/**
+ * The conversation's **surfaced set**: the canonical absolute paths the agent has
+ * actually revealed this conversation, via reads/lists/search/grep. It's the
+ * bounded authority for mutations — the model may only edit a file it has read,
+ * and only create inside a directory it has listed (see `crucibleTools`). Layered
+ * on top of `resolveInScope`'s scope confinement, not a replacement for it.
+ */
+export interface Surfaced {
+  /** Abs paths of files revealed by read/list/search/grep. */
+  files: Set<string>
+  /** Abs paths of directories revealed by list_files. */
+  dirs: Set<string>
+}
+
 /** Metadata for one persisted conversation (no turns — loaded on demand). */
 export interface ConversationMeta {
   id: string
@@ -107,6 +121,13 @@ const state = reactive({
   /** Which conversation is currently shown for a project, keyed by project id. */
   activeConversationId: {} as Record<string, string>,
 })
+
+/**
+ * The surfaced set is per-conversation, keyed by project id like the transcript.
+ * Kept OUT of the reactive `state` on purpose: it's plumbing for the agent loop,
+ * not something the UI renders, and reactive `Set` proxies would only add churn.
+ */
+const surfaced = new Map<string, Surfaced>()
 
 let seq = 0
 function nextId(): string {
@@ -179,6 +200,19 @@ export function appendSystemNote(projectId: string, text: string): ChatTurn {
 
 export function clearConversation(projectId: string): void {
   state.conversations[projectId] = []
+  // A conversation switch/reset also drops what was surfaced: authority to mutate
+  // must not carry across conversations.
+  surfaced.delete(projectId)
+}
+
+/** The conversation's surfaced set (created empty on first access). */
+export function surfacedFor(projectId: string): Surfaced {
+  let s = surfaced.get(projectId)
+  if (!s) {
+    s = { files: new Set(), dirs: new Set() }
+    surfaced.set(projectId, s)
+  }
+  return s
 }
 
 export function pinsFor(projectId: string): ChatPin[] {
@@ -222,5 +256,6 @@ export function _resetCrucibleState(): void {
   state.pins = {}
   state.conversationList = {}
   state.activeConversationId = {}
+  surfaced.clear()
   seq = 0
 }

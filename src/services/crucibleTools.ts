@@ -1,6 +1,7 @@
 import { fileService } from '@/services/fileService'
 import { retrieve, type Hit } from '@/services/crucible'
 import { isWindowsPath } from '@/services/paths'
+import type { Surfaced } from '@/services/crucibleState'
 
 /**
  * Crucible agent tools. The chat model calls these (native Ollama tool calling)
@@ -67,6 +68,13 @@ export interface ToolCtx {
   roots: string[]
   /** Commands that run without a prompt (Claude Code's allow rules). */
   agentCommands: string[]
+  /**
+   * The conversation's surfaced set — the paths the model has actually read or
+   * listed this conversation. Read tools populate it; mutating tools gate on it
+   * (see the `#2` authority rules in `runTool`). Layered on top of the
+   * `resolveInRoot` scope check, not a replacement for it.
+   */
+  surfaced: Surfaced 
   /** Commands refused outright, no prompt (Claude Code's deny rules). */
   commandDeny?: string[]
   /** Persist a command prefix to the allowlist after an "allow always". */
@@ -251,6 +259,134 @@ function clip(s: string): string {
   return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + '\n… (truncated)' : s
 }
 
+// --- #2: surfaced-set authority ---------------------------------------------
+//
+// Reads/lists/search/grep record what they reveal (files + dirs) into the
+// conversation's `Surfaced` set; mutations may only touch what's in it. This is
+// defense-in-depth *over* `resolveInRoot`'s scope confinement: even inside the
+// root, the model can't blind-fire an edit at a path it merely guessed — it must
+// have surfaced it first ("investigate before editing", as the system prompt
+// already tells it to).
+
+/** A leaf filename must be a single path segment — no separators, no `..`, not a
+ *  dot-name, non-empty. Guards new-file creation, where the model authors only
+ *  the name and the engine joins it onto a surfaced directory. */
+export function isValidLeafName(name: string): boolean {
+  return !!name && !/[\\/]/.test(name) && name !== '.' && name !== '..' && !name.includes('\0')
+}
+
+/**
+ * Resolve a write target against the surfaced set, returning `{ abs, display }`
+ * or throwing a clear refusal. Two shapes:
+ *  - **New file** (`dir` + `name`): the directory must be one the model listed,
+ *    and `name` a validated leaf; the engine joins them.
+ *  - **Existing file / addressed by `path`**: overwrite is allowed only when the
+ *    resolved path was surfaced. A `path` naming a not-yet-existing file is
+ *    accepted only when its parent directory was listed and its leaf is valid.
+ */
+function resolveWriteTarget(ctx: ToolCtx, args: Record<string, unknown>): { abs: string; display: string } {
+  const name = args.name != null ? String(args.name) : ''
+  const dirArg = args.dir != null ? String(args.dir) : ''
+
+  // Explicit new-file form: a listed directory + a validated leaf name.
+  if (name || dirArg) {
+    if (!dirArg) throw new Error('write_file needs a `dir` (a directory you listed) to create a new file')
+    if (!isValidLeafName(name)) {
+      throw new Error(`invalid file name "${name}": must be a single path segment (no "/", "\\", or "..")`)
+    }
+    const dirAbs = resolveInRoot(ctx.roots[0], dirArg)
+    if (!ctx.surfaced.dirs.has(dirAbs)) {
+      throw new Error(`refusing to create a file in ${dirArg}: list that directory first`)
+    }
+    return { abs: `${dirAbs}/${name}`, display: `${dirArg}/${name}` }
+  }
+
+  const path = String(args.path ?? '')
+  if (!path) throw new Error('write_file needs a `path` (a surfaced file) or a `dir`+`name` (a new file)')
+  const abs = resolveInRoot(ctx.roots[0], path)
+  // Overwrite an existing surfaced file.
+  if (ctx.surfaced.files.has(abs)) return { abs, display: path }
+  // Or create a new file addressed by full path — parent must be listed, leaf valid.
+  const slash = abs.lastIndexOf('/')
+  const parent = abs.slice(0, slash)
+  const leaf = abs.slice(slash + 1)
+  if (ctx.surfaced.dirs.has(parent) && isValidLeafName(leaf)) return { abs, display: path }
+  throw new Error(`refusing to write ${path}: read the file (to overwrite it) or list its directory (to create it) first`)
+}
+
+// --- #3: grammar-constrained argument schemas -------------------------------
+//
+// Per-tool JSON schemas fed the live `Surfaced` set, so the authority field of a
+// mutation is an `enum` of exactly the files/dirs surfaced so far. Handed to
+// Ollama's `format` for a grammar-locked second pass (Phase B), the sampler
+// physically can't emit a target that wasn't surfaced. Only the authority fields
+// are constrained; free text (`content`, `old_text`, `new_text`) stays open.
+
+export interface JsonSchema {
+  type?: string
+  enum?: string[]
+  description?: string
+  properties?: Record<string, JsonSchema>
+  required?: string[]
+}
+
+/**
+ * The Phase-B argument schema for `name`, or `null` when the tool has no
+ * constrainable authority field (reads, `run_command` — their args are free text
+ * or scope-checked paths, nothing to grammar-lock). Generated fresh each step
+ * from the live `surfaced` set.
+ */
+export function argSchemaFor(name: string, surfaced: Surfaced): JsonSchema | null {
+  const files = [...surfaced.files].sort()
+  const dirs = [...surfaced.dirs].sort()
+  switch (name) {
+    case 'edit_file':
+      return {
+        type: 'object',
+        properties: {
+          path: { enum: files, description: 'A file you have read this conversation.' },
+          old_text: { type: 'string', description: 'Exact text to replace.' },
+          new_text: { type: 'string', description: 'Replacement text.' },
+        },
+        required: ['path', 'old_text', 'new_text'],
+      }
+    case 'write_file':
+      return {
+        type: 'object',
+        properties: {
+          path: { enum: files, description: 'An existing surfaced file to overwrite.' },
+          dir: { enum: dirs, description: 'A directory you listed, to create a new file in.' },
+          name: { type: 'string', description: 'Leaf filename for a new file (no separators).' },
+          content: { type: 'string', description: 'Full file content.' },
+        },
+        required: ['content'],
+      }
+    default:
+      return null
+  }
+}
+
+/**
+ * Whether Phase A's draft args fail a *constrained* (enum) field — the sole
+ * reason to pay for the grammar-locked second pass. A constrained field trips it
+ * when it's present with a value outside its enum, or required-but-missing. Free
+ * text never trips it, so a tool the model already got right skips Phase B.
+ */
+export function needsArgSynthesis(schema: JsonSchema, args: Record<string, unknown>): boolean {
+  const props = schema.properties ?? {}
+  const required = schema.required ?? []
+  for (const [key, prop] of Object.entries(props)) {
+    if (!prop.enum) continue
+    const present = key in args && args[key] != null && args[key] !== ''
+    if (present) {
+      if (!prop.enum.includes(String(args[key]))) return true
+    } else if (required.includes(key)) {
+      return true
+    }
+  }
+  return false
+}
+
 /** Execute one tool call. Throws on policy block / denial / failure — the loop
  *  feeds the thrown message back to the model as the tool result. */
 export async function runTool(name: string, args: Record<string, unknown>, ctx: ToolCtx): Promise<ToolOutcome> {
@@ -261,6 +397,8 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
     case 'read_file': {
       const abs = resolveInScope(ctx.roots, str('path'))
       const content = await fileService.read(ctx.clientId, abs)
+      // Surfaced: reading a file authorizes a later edit of it.
+      ctx.surfaced.files.add(abs)
       const start = num('start_line')
       const end = num('end_line')
       if (start || end) {
@@ -273,10 +411,26 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
     case 'list_files': {
       const abs = resolveInScope(ctx.roots, str('path'))
       const entries = await fileService.list(ctx.clientId, abs)
+      // Surfaced: listing a directory authorizes creating a file in it, and each
+      // entry it reveals (child files editable, child dirs listable).
+      ctx.surfaced.dirs.add(abs)
+      for (const e of entries) {
+        const child = `${abs}/${e.name}`
+        if (e.type === 'dir') ctx.surfaced.dirs.add(child)
+        else ctx.surfaced.files.add(child)
+      }
       return { output: entries.map((e) => `${e.type === 'dir' ? '📁' : '  '} ${e.name}`).join('\n') || '(empty)' }
     }
     case 'search_code': {
       const hits: Hit[] = await retrieve(ctx.clientId, ctx.roots[0], str('query'), num('k') ?? 8)
+      // Surfaced: a hit reveals the file, enough to authorize reading/editing it.
+      for (const h of hits) {
+        try {
+          ctx.surfaced.files.add(resolveInRoot(ctx.roots[0], h.relative))
+        } catch {
+          /* a hit path outside the root can't be surfaced — ignore it */
+        }
+      }
       return {
         output:
           hits
@@ -291,6 +445,17 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
       if (res.code !== 0 && !res.stdout) {
         // rg exits 1 on "no matches" — report that rather than erroring.
         return { output: res.code === 1 ? 'No matches.' : (res.stderr || res.error || `grep exit ${res.code}`).trim() }
+      }
+      // Surfaced: each `path:line:…` match reveals the file (paths are relative to
+      // the primary root, `rg`'s cwd).
+      for (const line of res.stdout.split('\n')) {
+        const relPath = line.slice(0, line.indexOf(':'))
+        if (!relPath) continue
+        try {
+          ctx.surfaced.files.add(resolveInRoot(ctx.roots[0], relPath))
+        } catch {
+          /* unparseable / out-of-root line — ignore */
+        }
       }
       return { output: clip(res.stdout) || 'No matches.' }
     }
@@ -330,8 +495,10 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
         throw new Error('edit denied by the user')
       }
       await fileService.write(ctx.clientId, abs, content)
+      // Writing surfaces the file for any later edit in the conversation.
+      ctx.surfaced.files.add(abs)
       ctx.onEdit?.(abs)
-      return { output: `Wrote ${content.length} bytes to ${str('path')}`, diff }
+      return { output: `Wrote ${content.length} bytes`, diff }
     }
     case 'edit_file': {
       const abs = resolveInScope(ctx.roots, str('path'))
