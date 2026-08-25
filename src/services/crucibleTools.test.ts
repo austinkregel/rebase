@@ -43,7 +43,6 @@ vi.mock('@/services/fileService', () => ({
 vi.mock('@/services/crucible', () => ({ retrieve: vi.fn(async () => []) }))
 
 const emptySurfaced = (): Surfaced => ({ files: new Set(), dirs: new Set() })
-vi.mock('@/services/crucible', () => ({ retrieve: vi.fn(async () => []) }))
 
 describe('resolveInRoot', () => {
   it('joins a relative path under the root', () => {
