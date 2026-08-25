@@ -261,6 +261,10 @@ pub struct ChatResult {
     pub content: String,
     pub tool_calls: Vec<serde_json::Value>,
     pub cancelled: bool,
+    /// The stream was cut short because the model began repeating itself (a short
+    /// unit over and over) — a runaway from a missing stop token / flaky custom
+    /// parser, not a normal completion. Content is trimmed of the repeated tail.
+    pub degenerated: bool,
 }
 
 /// In-flight `crucible_chat` calls, keyed by the caller's `requestId`.
@@ -356,6 +360,66 @@ pub fn crucible_chat_cancel(request_id: String, cancels: State<'_, Arc<ChatCance
 /// channel, tests pass `stream::iter` and a closure. This is the part of the
 /// chat path most worth pinning — the framing, and the cancellation semantics
 /// that decide whether Stop actually stops.
+// --- Degeneration guard ----------------------------------------------------
+//
+// A model with no stop token (or a flaky custom renderer/parser — increasingly
+// common: `TEMPLATE {{ .Prompt }}` + `RENDERER x` + `PARSER x` and no
+// `PARAMETER stop`) can run away emitting one short unit forever, e.g.
+// `</assistant></assistant>…`, pinning the machine until Ollama is killed. Since
+// Re:Base points at whatever model the user configures, we can't trust any of
+// them to self-terminate — so we watch the output and cut it off if it collapses
+// into repetition. Model-agnostic: it keys on the *shape* (a short unit repeated
+// far past anything natural), not on any specific token.
+
+/// Smallest period `u` (1..=MAX_UNIT) such that the tail of `s` is `u` repeated
+/// across at least MIN_SPAN chars and MIN_REPEATS times, or None. Thresholds are
+/// set high enough that natural text (even a long `----` rule or `...`) never
+/// trips it: it takes ~120+ chars of pure repetition.
+fn degenerate_period(s: &str) -> Option<usize> {
+    const WINDOW: usize = 512;
+    const MAX_UNIT: usize = 32;
+    const MIN_REPEATS: usize = 10;
+    const MIN_SPAN: usize = 120;
+
+    let tail: Vec<char> = {
+        let mut v: Vec<char> = s.chars().rev().take(WINDOW).collect();
+        v.reverse();
+        v
+    };
+    let n = tail.len();
+    for unit in 1..=MAX_UNIT {
+        let need = (unit * MIN_REPEATS).max(MIN_SPAN);
+        if need > n {
+            break;
+        }
+        let start = n - need;
+        // The whole `need`-char span must be `unit`-periodic (reference = the
+        // first `unit` chars of the span).
+        let periodic = (0..need).all(|k| tail[start + k] == tail[start + k % unit]);
+        if periodic {
+            return Some(unit);
+        }
+    }
+    None
+}
+
+/// Strip a runaway repeated suffix down to a single occurrence of the unit, so
+/// the surfaced answer keeps the real content without the spam tail.
+fn trim_degenerate_tail(s: &str) -> String {
+    let Some(unit) = degenerate_period(s) else {
+        return s.to_string();
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let unit_chars = &chars[n - unit..];
+    let mut end = n;
+    while end >= unit && &chars[end - unit..end] == unit_chars {
+        end -= unit;
+    }
+    end += unit; // keep one occurrence
+    chars[..end.min(n)].iter().collect()
+}
+
 async fn drain_ndjson<S, B, E>(
     mut stream: S,
     mut cancel_rx: Option<oneshot::Receiver<()>>,
@@ -370,6 +434,7 @@ where
     let mut content = String::new();
     let mut tool_calls: Vec<serde_json::Value> = Vec::new();
     let mut cancelled = false;
+    let mut degenerated = false;
 
     loop {
         // `biased` so the cancel is checked first and Stop takes effect on the
@@ -401,6 +466,11 @@ where
                         if !tok.is_empty() {
                             content.push_str(tok);
                             on_token(tok);
+                            // Cut a runaway model off rather than stream forever.
+                            if degenerate_period(&content).is_some() {
+                                degenerated = true;
+                                break;
+                            }
                         }
                     }
                     if let Some(tc) = msg.get("tool_calls").and_then(|c| c.as_array()) {
@@ -412,18 +482,27 @@ where
                         content,
                         tool_calls,
                         cancelled: false,
+                        degenerated: false,
                     });
                 }
             }
         }
+        if degenerated {
+            break;
+        }
     }
 
-    // Fell out of the loop: either cancelled, or the stream ended without a
-    // `done` frame. Both keep the partial content.
+    // Fell out of the loop: cancelled, degenerated, or the stream ended without a
+    // `done` frame. All keep the partial content; a degenerate run also trims its
+    // repeated tail so the surfaced answer isn't buried in spam.
+    if degenerated {
+        content = trim_degenerate_tail(&content);
+    }
     Ok(ChatResult {
         content,
         tool_calls,
         cancelled,
+        degenerated,
     })
 }
 
@@ -515,6 +594,7 @@ pub async fn crucible_chat(
                     content: String::new(),
                     tool_calls: Vec::new(),
                     cancelled: true,
+                    degenerated: false,
                 })
             }
             r = request => r,
@@ -816,6 +896,60 @@ mod tests {
         let (result, _) = drain(vec![r#"{"message":{"content":"partial"}}"#, "\n"], None).await;
         assert_eq!(result.content, "partial");
         assert!(!result.cancelled, "an ended stream is not a cancellation");
+    }
+
+    #[test]
+    fn degenerate_period_flags_repetition_and_ignores_natural_text() {
+        // The real failure: a turn-close tag repeated forever.
+        let runaway = format!("Here is the answer.{}", "</assistant>".repeat(30));
+        assert_eq!(degenerate_period(&runaway), Some("</assistant>".chars().count()));
+
+        // A single character spammed.
+        assert_eq!(degenerate_period(&"x".repeat(200)), Some(1));
+
+        // Natural text must never trip it, nor a short/rule-length repeat.
+        assert_eq!(
+            degenerate_period(
+                "The indexer signs each release binary and the agent verifies that \
+                 signature against a pinned public key before running it, so nothing \
+                 unverified ever runs."
+            ),
+            None
+        );
+        assert_eq!(degenerate_period(&"-".repeat(80)), None, "80 dashes is under the span threshold");
+        assert_eq!(degenerate_period("done..."), None);
+    }
+
+    #[test]
+    fn trim_degenerate_tail_keeps_content_and_one_unit() {
+        let runaway = format!("Real answer.{}", "</assistant>".repeat(40));
+        assert_eq!(trim_degenerate_tail(&runaway), "Real answer.</assistant>");
+        assert_eq!(trim_degenerate_tail("just fine"), "just fine", "non-degenerate is unchanged");
+    }
+
+    #[tokio::test]
+    async fn a_runaway_model_is_cut_off_and_flagged() {
+        let mut chunks: Vec<&'static str> = vec![r#"{"message":{"content":"ANSWER "}}"#, "\n"];
+        // 15 turn-close tags (180 chars) — well past the guard's threshold.
+        for _ in 0..15 {
+            chunks.push(r#"{"message":{"content":"</assistant>"}}"#);
+            chunks.push("\n");
+        }
+        // A frame after the runaway: it must never be consumed (we stopped early).
+        chunks.push(r#"{"message":{"content":"SHOULD_NOT_APPEAR"}}"#);
+        chunks.push("\n");
+
+        let (result, _) = drain(chunks, None).await;
+        assert!(result.degenerated, "runaway repetition should set degenerated");
+        assert!(!result.cancelled, "a runaway is not a user cancel");
+        assert!(result.content.starts_with("ANSWER "), "the real content is kept");
+        assert!(!result.content.contains("SHOULD_NOT_APPEAR"), "the stream stops at detection");
+        assert!(
+            result.content.ends_with("</assistant>")
+                && !result.content.ends_with("</assistant></assistant>"),
+            "tail trimmed to a single unit: {:?}",
+            result.content
+        );
     }
 
     #[tokio::test]
