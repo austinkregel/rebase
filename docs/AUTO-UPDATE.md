@@ -91,8 +91,8 @@ same as mercs2.)
 
 **Recorded** (public, safe to store): key B's pubkey for `plugins.updater.pubkey`
 is the Tauri-format base64 —
-`dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0OTI0OUY4RDJCOUNBQzIKUldUQ3lyblMrRW1TZENLQytEYlJXTjd2SnRRTUZUNS9xK1V5R0RuaEI3a0NrQkpqRytmbFJGM0gK`
-(inner minisign key id `749249F8D2B9CAC2`). Secrets `TAURI_SIGNING_PRIVATE_KEY` +
+`dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQzOTgxMkVEQjI2NTRFMDQKUldRRVRtV3k3UktZUTdBZVN2QUE4enh2aWwvaDN5eVltdm42UDduMkpoMWhvc08vUitIYXJ4M3EK`
+(inner minisign key id `439812EDB2654E04`). Secrets `TAURI_SIGNING_PRIVATE_KEY` +
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are already set on the `rebase` repo.
 
 ## Fail-loud
@@ -122,3 +122,24 @@ Nothing outside `rebase`. The control plane and `compute-agent` are untouched.
 - **Manual/e2e** (can't be unit-tested without a real signed release): tag a
   pre-release, confirm an older build detects it, prompts, installs, relaunches.
   Called out as manual rather than pretended-covered.
+
+## Key rotation (v0.0.5)
+
+The first key B (`749249F8D2B9CAC2`) never produced a shipped artifact: the
+v0.0.5 build failed on every platform with `failed to decode secret key:
+incorrect updater private key password: failed to fill whole buffer`, and the
+private half was not recoverable. It was replaced with `439812EDB2654E04`.
+
+Rotating cost nothing *because* nothing had shipped yet — no installed app
+pinned the old key. That window closed with the first successful signed
+release: rotating after one exists strands every client on the old pubkey,
+since an app only trusts the key baked into it. A future rotation means
+shipping a build that pins the new key and waiting for adoption before signing
+with it.
+
+The failure also surfaced at bundle time, ~45 minutes into three parallel
+builds. `verify` now preflights the key: it signs a scratch file and checks it
+with `minisign` against the pubkey pinned in `tauri.conf.json`. That catches a
+key that will not decode *and* a key that decodes but is not the pinned one —
+the second being the worse case, since it builds green and ships updates every
+installed app silently refuses.

@@ -19,7 +19,7 @@
       "endpoints": [
         "https://github.com/austinkregel/rebase/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0OTI0OUY4RDJCOUNBQzIKUldUQ3lyblMrRW1TZENLQytEYlJXTjd2SnRRTUZUNS9xK1V5R0RuaEI3a0NrQkpqRytmbFJGM0gK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQzOTgxMkVEQjI2NTRFMDQKUldRRVRtV3k3UktZUTdBZVN2QUE4enh2aWwvaDN5eVltdm42UDduMkpoMWhvc08vUitIYXJ4M3EK"
     }
   },
   "app": {

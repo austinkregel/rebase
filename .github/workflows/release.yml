@@ -34,6 +34,40 @@ jobs:
           cache: npm
       - run: npm ci
 
+      # A bad signing key otherwise surfaces in the bundler, at the very end of a
+      # ~45 minute build, on all three runners at once — which is exactly how
+      # v0.0.5 burned an hour. Signing a scratch file here fails in seconds.
+      #
+      # Verifying that signature against the pubkey pinned in tauri.conf.json
+      # also catches the nastier case: a key that decodes fine but is not the key
+      # clients pin. That builds green and ships updates every installed app
+      # silently refuses, which is far more expensive to find later.
+      - name: Preflight the updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is unset; createUpdaterArtifacts is on, so the build would fail at bundle time."
+            exit 1
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+
+          echo preflight > preflight.txt
+          npx tauri signer sign preflight.txt
+
+          # tauri base64-wraps both the signature and the pinned pubkey; unwrap
+          # each so minisign can check one against the other.
+          base64 -d < preflight.txt.sig > preflight.minisig
+          jq -r '.plugins.updater.pubkey' src-tauri/tauri.conf.json | base64 -d > updater.pub
+          if ! minisign -V -p updater.pub -m preflight.txt -x preflight.minisig; then
+            echo "::error::Signing key does not match plugins.updater.pubkey in tauri.conf.json — updates signed with it would be refused by every installed app."
+            exit 1
+          fi
+          echo "::notice::Updater signing key verified against the pinned pubkey."
+
       # After npm ci — stamping package.json first would leave it out of step
       # with package-lock.json, which npm ci refuses to reconcile.
       - name: Stamp the tag's version into the manifests
