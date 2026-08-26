@@ -52,21 +52,15 @@ jobs:
             echo "::error::TAURI_SIGNING_PRIVATE_KEY is unset; createUpdaterArtifacts is on, so the build would fail at bundle time."
             exit 1
           fi
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq minisign
-
+          # Fails right here if the key will not decode with the password — the
+          # whole reason this runs before anything compiles.
           echo preflight > preflight.txt
           npx tauri signer sign preflight.txt
 
-          # tauri base64-wraps both the signature and the pinned pubkey; unwrap
-          # each so minisign can check one against the other.
+          # tauri base64-wraps both the signature and the pinned pubkey.
           base64 -d < preflight.txt.sig > preflight.minisig
           jq -r '.plugins.updater.pubkey' src-tauri/tauri.conf.json | base64 -d > updater.pub
-          if ! minisign -V -p updater.pub -m preflight.txt -x preflight.minisig; then
-            echo "::error::Signing key does not match plugins.updater.pubkey in tauri.conf.json — updates signed with it would be refused by every installed app."
-            exit 1
-          fi
-          echo "::notice::Updater signing key verified against the pinned pubkey."
+          node scripts/check-updater-key.mjs updater.pub preflight.minisig
 
       # After npm ci — stamping package.json first would leave it out of step
       # with package-lock.json, which npm ci refuses to reconcile.
