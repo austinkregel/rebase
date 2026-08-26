@@ -332,11 +332,8 @@ jobs:
           echo "--- latest.json ---"
           jq '.platforms |= map_values({url, signature: (.signature[0:16] + "...")})' latest.json
 
-          # Replace rather than append: a re-run must not leave two latest.json
-          # assets on the release, which GitHub would disambiguate by renaming.
-          old=$(echo "$assets" | jq -r '.[] | select(.name == "latest.json") | .id')
-          if [ -n "$old" ] && [ "$old" != "null" ]; then
-            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"
-          fi
-          gh release upload "$TAG" latest.json --clobber
+          # --clobber replaces any existing latest.json rather than letting GitHub
+          # append a renamed duplicate on a re-run. --repo because this job has no
+          # checkout: gh otherwise infers the repo from git and fails outright.
+          gh release upload "$TAG" latest.json --clobber --repo "$GITHUB_REPOSITORY"
           echo "::notice::Attached latest.json for $version"
