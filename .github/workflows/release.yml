@@ -6,9 +6,10 @@ name: Release
 # tauri.conf.json and the Cargo manifests at build time, so releasing never
 # requires a commit that bumps those five files.
 #
-# One release per tag, created up front by create-release and then uploaded to
-# by every build job. The release is published immediately and fills in as the
-# platforms finish, so it is briefly visible with only some of its bundles.
+# One release per tag, created as a draft by create-release, uploaded to by
+# every build job, and published by the final job only once all of them and the
+# updater manifest have succeeded. A failed run therefore leaves an invisible
+# draft rather than a public release advertising nothing.
 on:
   push:
     tags: ['v*.*.*']
@@ -123,13 +124,12 @@ jobs:
 
           if [ "$count" -eq 1 ]; then
             id="$ids"
-            gh api "repos/$GITHUB_REPOSITORY/releases/$id" -X PATCH -F draft=false >/dev/null
             echo "::notice::Reusing release $id for $TAG"
           else
             id=$(gh api "repos/$GITHUB_REPOSITORY/releases" -X POST \
                    -f tag_name="$TAG" -f name="rebase $TAG" \
-                   -F draft=false -F prerelease=false --jq '.id')
-            echo "::notice::Created release $id for $TAG"
+                   -F draft=true -F prerelease=false --jq '.id')
+            echo "::notice::Created draft release $id for $TAG"
           fi
           echo "release_id=$id" >> "$GITHUB_OUTPUT"
 
@@ -254,18 +254,26 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
 
-  # latest.json is what an installed app polls. It is assembled here rather
-  # than by the bundler because only this job can see all three platforms'
-  # artifacts at once. See docs/AUTO-UPDATE.md.
+  # latest.json is what an installed app polls. It is assembled here rather than
+  # by the bundler because only a job downstream of all three builds can see
+  # every platform's artifacts at once. See docs/AUTO-UPDATE.md.
   #
-  # A platform missing from the manifest does not error in the client — it
-  # tells that platform "you are up to date" forever. So every expected target
-  # is asserted, and a missing artifact or .sig fails the release.
+  # The decisions — which artifact serves which updater key, and whether the set
+  # is complete — live in scripts/build-updater-manifest.mjs, where they are unit
+  # tested on every push. They used to live here, which meant they first ran
+  # forty minutes into a tagged release: the worst place to find a typo, and the
+  # reason v0.0.7's manifest had to be finished by hand. This job now only does
+  # the I/O the script cannot.
   updater-manifest:
     name: Assemble latest.json
     needs: [create-release, release]
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Build and attach latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -273,67 +281,46 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
           set -euo pipefail
-          version="${TAG#v}"
+          mkdir -p sigs
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate > assets.json
 
-          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate)
+          # Fetch every signature and let the script decide which of them matter.
+          # The loop stays deliberately dumb so the part that can be wrong is the
+          # part that has tests.
+          jq -r '.[] | select(.name | endswith(".sig")) | "\(.id)\t\(.name)"' assets.json \
+            | while IFS=$'\t' read -r id name; do
+                gh api -H "Accept: application/octet-stream" \
+                  "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "sigs/$name"
+              done
 
-          # updater key -> the artifact suffix that serves it. The macOS build is
-          # universal, so one .app.tar.gz answers for both darwin arches.
-          #
-          # linux-aarch64 and windows-aarch64 are absent on purpose: the release
-          # matrix does not build them. Adding a key here without a matching
-          # build would be worse than omitting it — the manifest would advertise
-          # an artifact that does not exist.
-          targets="darwin-aarch64:_universal.app.tar.gz
-          darwin-x86_64:_universal.app.tar.gz
-          linux-x86_64:.AppImage
-          windows-x86_64:-setup.exe"
-
-          platforms='{}'
-          while IFS= read -r line; do
-            key="${line%%:*}"
-            suffix="${line##*:}"
-            suffix="$(echo "$suffix" | xargs)"
-
-            # Exactly one artifact must match, or the mapping above is stale.
-            matches=$(echo "$assets" | jq -r --arg s "$suffix" \
-              '[.[] | select(.name | endswith($s)) | select(.name | endswith(".sig") | not)] | .[].name')
-            n=$(printf '%s' "$matches" | grep -c . || true)
-            if [ "$n" -ne 1 ]; then
-              echo "::error::$key: expected 1 artifact ending '$suffix', found $n ($(echo $matches))"
-              exit 1
-            fi
-            name="$matches"
-            url=$(echo "$assets" | jq -r --arg n "$name" '.[] | select(.name == $n) | .browser_download_url')
-
-            sig_id=$(echo "$assets" | jq -r --arg n "$name.sig" '.[] | select(.name == $n) | .id')
-            if [ -z "$sig_id" ] || [ "$sig_id" = "null" ]; then
-              echo "::error::$key: '$name' has no .sig — updater signing did not run for this platform."
-              exit 1
-            fi
-            signature=$(gh api -H "Accept: application/octet-stream" \
-              "repos/$GITHUB_REPOSITORY/releases/assets/$sig_id")
-            if [ -z "$signature" ]; then
-              echo "::error::$key: '$name.sig' is empty."
-              exit 1
-            fi
-
-            platforms=$(echo "$platforms" | jq --arg k "$key" --arg u "$url" --arg s "$signature" \
-              '.[$k] = {signature: $s, url: $u}')
-            echo "  $key -> $name"
-          done <<< "$targets"
-
-          jq -n --arg v "$version" \
-                --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                --arg n "See https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" \
-                --argjson p "$platforms" \
-                '{version: $v, notes: $n, pub_date: $d, platforms: $p}' > latest.json
-
-          echo "--- latest.json ---"
-          jq '.platforms |= map_values({url, signature: (.signature[0:16] + "...")})' latest.json
+          node scripts/build-updater-manifest.mjs \
+            --assets assets.json --sig-dir sigs \
+            --tag "$TAG" --repo "$GITHUB_REPOSITORY" --out latest.json
 
           # --clobber replaces any existing latest.json rather than letting GitHub
-          # append a renamed duplicate on a re-run. --repo because this job has no
-          # checkout: gh otherwise infers the repo from git and fails outright.
+          # append a renamed duplicate on a re-run. --repo because gh otherwise
+          # infers it from the git remote.
           gh release upload "$TAG" latest.json --clobber --repo "$GITHUB_REPOSITORY"
-          echo "::notice::Attached latest.json for $version"
+
+  # The release is a draft until this point, and this job is the only thing that
+  # ever publishes it. Publishing up front meant a failed build left an empty
+  # release sitting at the top of the releases page advertising nothing — which
+  # is what v0.0.5 did, and it is still there. Now a failure leaves a draft
+  # nobody sees, and success leaves exactly one complete published release.
+  #
+  # This is not a draft anyone has to publish by hand; finishing the run is what
+  # publishes it.
+  publish:
+    name: Publish release
+    needs: [create-release, release, updater-manifest]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          url=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+                  -X PATCH -F draft=false --jq '.html_url')
+          echo "::notice::Published $url"
