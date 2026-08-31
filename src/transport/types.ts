@@ -22,6 +22,9 @@ export interface PublicClient {
   home?: string
   cpus?: string
   agentVersion?: string
+  /** Feature flags the agent advertises, e.g. "file_get.range", "file_append",
+   *  "file_patch". Absent ⇒ assume the base (whole-file) protocol only. */
+  capabilities?: string[]
   /** Direct-connection advertisement (present when the agent exposes a P2P endpoint). */
   directAddr?: string
   directCertSha256?: string
@@ -177,6 +180,26 @@ export interface FileGetResult {
   path?: string
   size?: number
   error?: string
+  // Ranged-read fields — populated by agents advertising "file_get.range".
+  // `offset` echoes the served window start; `returned` is the bytes streamed;
+  // `eof` marks the window reaching end of file; `truncated` marks it cut by
+  // maxSize. `errorCode` is a machine-readable failure (see docs/PROTOCOL-RANGED-IO.md).
+  offset?: number
+  returned?: number
+  eof?: boolean
+  truncated?: boolean
+  errorCode?: string
+}
+
+/** Result of a windowed read (see fileService.readRange). */
+export interface ReadRange {
+  bytes: Uint8Array
+  /** Byte offset actually served (may differ from requested if clamped). */
+  offset: number
+  /** Total file size, or -1 when unknown/streaming (e.g. /proc). */
+  size: number
+  eof: boolean
+  truncated: boolean
 }
 
 export interface FileMkdirResult {

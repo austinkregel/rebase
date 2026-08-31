@@ -56,9 +56,12 @@ export class Rpc {
     data: Record<string, unknown> & { requestId: string },
     options: CallOptions = {},
   ): Promise<T> {
-    const promise = this.next<T>(responseEvent, data.requestId, options)
+    // Subscribe before emitting so an immediate response can't be missed. If the
+    // emit fails, cancel the pending subscription — otherwise its listener leaks
+    // and its timer later rejects a promise no one holds (unhandled rejection).
+    const { promise, cancel } = this.nextCancelable<T>(responseEvent, data.requestId, options)
     if (!this.socket.emit(requestEvent, data)) {
-      return Promise.reject(new Error('Not connected to control plane'))
+      cancel(new Error('Not connected to control plane'))
     }
     return promise
   }
@@ -73,8 +76,24 @@ export class Rpc {
     requestId: string,
     options: CallOptions = {},
   ): Promise<T> {
+    return this.nextCancelable<T>(responseEvent, requestId, options).promise
+  }
+
+  /**
+   * Like {@link next}, but also returns a `cancel(err)` that tears the
+   * subscription down and rejects the promise. Used by multi-step flows (chunked
+   * upload) that subscribe for a terminal result then emit separately: if a
+   * later emit fails they must cancel the pending wait, or its listener leaks and
+   * its timer later rejects a promise no one holds (unhandled rejection).
+   */
+  nextCancelable<T = Record<string, unknown>>(
+    responseEvent: string,
+    requestId: string,
+    options: CallOptions = {},
+  ): { promise: Promise<T>; cancel: (err: Error) => void } {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    return new Promise<T>((resolve, reject) => {
+    let cancel!: (err: Error) => void
+    const promise = new Promise<T>((resolve, reject) => {
       const stop = this.expect(responseEvent, requestId, (data) => {
         if (options.match && !options.match(data)) return
         cleanup()
@@ -88,6 +107,11 @@ export class Rpc {
         clearTimeout(timer)
         stop()
       }
+      cancel = (err: Error) => {
+        cleanup()
+        reject(err)
+      }
     })
+    return { promise, cancel }
   }
 }

@@ -65,9 +65,13 @@ export class ControlPlaneSocket implements Transport {
     }
 
     ws.onclose = () => {
-      if (this.ws === ws) this.ws = null
-      this.setStatus('closed')
-      if (!this.closedByUser) this.scheduleReconnect()
+      // A superseded socket (one we already replaced) must not stomp the current
+      // socket's status or arm a reconnect — only the live socket's close counts.
+      if (this.ws === ws) {
+        this.ws = null
+        this.setStatus('closed')
+        if (!this.closedByUser) this.scheduleReconnect()
+      }
     }
 
     ws.onerror = () => {

@@ -63,6 +63,18 @@ describe('agents store — reachability', () => {
     expect(agents.isOnline('c2')).toBe(false)
   })
 
+  it('supports() reflects an agent’s advertised capabilities', () => {
+    const agents = useAgentsStore()
+    agents.agents = [
+      { clientId: 'c1', authenticated: true, capabilities: ['file_get.range'] },
+      { clientId: 'c2', authenticated: true },
+    ] as never
+    expect(agents.supports('c1', 'file_get.range')).toBe(true)
+    expect(agents.supports('c1', 'file_patch')).toBe(false)
+    expect(agents.supports('c2', 'file_get.range')).toBe(false)
+    expect(agents.supports(null, 'file_get.range')).toBe(false)
+  })
+
   it('drops the client_list when the socket closes', () => {
     const agents = connected('c1')
     expect(agents.isOnline('c1')).toBe(true)

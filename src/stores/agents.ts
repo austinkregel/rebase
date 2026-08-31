@@ -90,6 +90,14 @@ export const useAgentsStore = defineStore('agents', {
         clientId,
     statsFor: (state) => (clientId: string) => state.stats[clientId],
     alertsFor: (state) => (clientId: string) => state.alerts[clientId],
+    /** Whether an agent advertises a protocol capability (e.g. "file_get.range").
+     *  Absent capabilities ⇒ false, so callers surface an explicit "unsupported"
+     *  error rather than silently attempting an operation the agent can't serve. */
+    supports:
+      (state) =>
+      (clientId: string | null, capability: string): boolean =>
+        !!clientId &&
+        !!state.agents.find((a) => a.clientId === clientId)?.capabilities?.includes(capability),
     /** Agents sorted alphabetically by hostname (then clientId as tiebreak). */
     sortedAgents: (state) =>
       [...state.agents].sort((a, b) => {
