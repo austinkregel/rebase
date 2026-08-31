@@ -1,7 +1,7 @@
 import { reactive } from 'vue'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { isTauri } from '@/transport/contract'
-import { fileService } from '@/services/fileService'
+import { readTextForAgent } from '@/services/fileContent'
 import { notify } from '@/services/notifications'
 import { useSettingsStore } from '@/stores/settings'
 import type { Project } from '@/stores/projects'
@@ -31,7 +31,6 @@ import {
 import {
   TOOL_SCHEMAS,
   READ_ONLY_TOOL_SCHEMAS,
-  READ_ONLY_TOOLS,
   argSchemaFor,
   needsArgSynthesis,
   parseToolCall,
@@ -303,6 +302,14 @@ export async function loadConversations(pid: string): Promise<void> {
 /** Switch to a different conversation — clears current turns and loads the
  *  requested one from disk. */
 export async function activateConversation(pid: string, convId: string): Promise<void> {
+  // Refuse mid-stream: clearing/replacing turns while `ask()`'s loop is still
+  // appending and persisting (into this project's active conversation) would strand
+  // in-flight turns on disk under the wrong conversation. Mirrors `ask()`'s own
+  // `if (activeLoop) return` guard. Stop the run first, then switch.
+  if (isStreaming(pid)) {
+    notify.warning('Stop the current response before switching conversations', { source: 'Crucible' })
+    return
+  }
   clearConversation(pid)
   setActiveConversationId(pid, convId)
   if (!isTauri()) return
@@ -325,6 +332,12 @@ export async function activateConversation(pid: string, convId: string): Promise
 
 /** Create a blank new conversation and make it active. */
 export async function newConversation(pid: string): Promise<void> {
+  // Refuse mid-stream (see `activateConversation`): swapping the active conversation
+  // out from under a running loop would misfile its in-flight turns.
+  if (isStreaming(pid)) {
+    notify.warning('Stop the current response before starting a new conversation', { source: 'Crucible' })
+    return
+  }
   const id = crypto.randomUUID()
   clearConversation(pid)
   setActiveConversationId(pid, id)
@@ -522,7 +535,10 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
       await Promise.all(
         pins.map(async (p) => {
           try {
-            return { path: p.path, content: await fileService.read(p.clientId, p.path) }
+            // Safe read: a pinned binary/oversized file must not inject mojibake
+            // into the prompt — drop it rather than feed garbage.
+            const { text, binary } = await readTextForAgent(p.clientId, p.path)
+            return binary ? null : { path: p.path, content: text }
           } catch {
             return null
           }
@@ -682,7 +698,9 @@ export async function ask(project: Project, userText: string, pins: ChatPin[]): 
             output: outcome.output,
             diff: outcome.diff,
           })
-          if (!READ_ONLY_TOOLS.has(name)) consecutiveFailures = 0
+          // Any successful tool result breaks the failure streak — a successful
+          // read between failures makes them non-consecutive too.
+          consecutiveFailures = 0
         } catch (err) {
           resultText = `Error: ${err instanceof Error ? err.message : String(err)}`
           const denied = /denied|stopped/i.test(resultText)

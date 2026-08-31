@@ -30,6 +30,13 @@ describe('indexerAsset', () => {
   it('rejects Windows agents (unix-only agent cache path)', () => {
     expect(() => indexerAsset('Microsoft Windows 11', 'x86_64')).toThrow(/Windows/)
   })
+  it('rejects an Intel (x86_64) Mac agent with a clear error', () => {
+    expect(() => indexerAsset('darwin', 'x86_64')).toThrow(/Intel Macs are not supported/)
+    expect(() => indexerAsset('macOS', 'amd64')).toThrow(/Apple Silicon/)
+  })
+  it('maps an aarch64 Mac to the macos-arm64 asset', () => {
+    expect(indexerAsset('darwin', 'aarch64')).toBe('rebase-indexer-macos-arm64')
+  })
 })
 
 describe('crucibleState', () => {

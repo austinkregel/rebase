@@ -21,9 +21,16 @@ import type { Surfaced } from './crucibleState'
 // the (also-hoisted) vi.mock factory can close over it.
 const { files } = vi.hoisted(() => ({ files: new Map<string, string>() }))
 vi.mock('@/services/fileService', () => ({
+  FileOpError: class extends Error {},
   fileService: {
     read: vi.fn(async (_c: string, abs: string) => {
       if (files.has(abs)) return files.get(abs)!
+      throw new Error('not found')
+    }),
+    // read_file now routes through fileContent.readTextForAgent → stat + readBytes.
+    stat: vi.fn(async () => null),
+    readBytes: vi.fn(async (_c: string, abs: string) => {
+      if (files.has(abs)) return new TextEncoder().encode(files.get(abs)!)
       throw new Error('not found')
     }),
     write: vi.fn(async (_c: string, abs: string, content: string) => {
@@ -313,6 +320,16 @@ describe('runTool — surfaced-set authority (#2)', () => {
     expect(ctx.approve).toHaveBeenCalledTimes(1)
   })
 
+  it('inserts new_text literally, not as a $-replacement pattern', async () => {
+    // `$&` / `$1` in new_text must be written verbatim (a plain String.replace
+    // would expand them). Also verify only the first match is replaced.
+    const ctx = baseCtx()
+    files.set(`${ROOT}/src/a.ts`, 'foo foo')
+    await runTool('read_file', { path: 'src/a.ts' }, ctx)
+    await runTool('edit_file', { path: 'src/a.ts', old_text: 'foo', new_text: '$& $1 bar' }, ctx)
+    expect(files.get(`${ROOT}/src/a.ts`)).toBe('$& $1 bar foo')
+  })
+
   it('refuses a write to an un-surfaced path before ever asking for approval', async () => {
     const ctx = baseCtx()
     await expect(runTool('write_file', { path: 'src/new.ts', content: 'x' }, ctx)).rejects.toThrow(
@@ -398,9 +415,12 @@ describe('argSchemaFor — Phase-B schema is built from the surfaced set (#3)', 
     expect(s.required).toEqual(['path', 'old_text', 'new_text'])
   })
 
-  it('write_file constrains the overwrite target to files and the new-file dir to dirs', () => {
+  it('write_file leaves `path` free-form (new-file creates) but constrains the new-file dir to dirs', () => {
     const s = argSchemaFor('write_file', surfaced)!
-    expect(s.properties!.path.enum).toEqual(['/p/src/bar.ts', '/p/src/foo.ts'])
+    // `path` is intentionally NOT enum-constrained: a new file addressed by full
+    // path must be expressible (M13). resolveWriteTarget still gates the target.
+    expect(s.properties!.path.enum).toBeUndefined()
+    expect(s.properties!.path.type).toBe('string')
     expect(s.properties!.dir.enum).toEqual(['/p/src'])
     expect(s.properties!.name.enum).toBeUndefined()
     expect(s.properties!.content.enum).toBeUndefined()
@@ -441,5 +461,12 @@ describe('needsArgSynthesis — the adaptive Phase-B trigger (#3)', () => {
   it('fires when the new-file dir is not one of the surfaced dirs', () => {
     const s = argSchemaFor('write_file', surfaced)!
     expect(needsArgSynthesis(s, { dir: '/p/elsewhere', name: 'x.ts', content: 'z' })).toBe(true)
+  })
+
+  it('does NOT fire for a write_file new-file path outside the surfaced set (M13)', () => {
+    // A legitimate new-file create by full path must not be forced into Phase-B
+    // arg synthesis (which would redirect it onto an existing surfaced file).
+    const s = argSchemaFor('write_file', surfaced)!
+    expect(needsArgSynthesis(s, { path: '/p/brand-new.ts', content: 'z' })).toBe(false)
   })
 })

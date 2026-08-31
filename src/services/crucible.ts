@@ -66,7 +66,8 @@ export interface Hit {
 }
 
 /** Map an agent's reported platform/arch onto a release asset name
- *  (github.com/austinkregel/rebase-indexer releases). */
+ *  (github.com/austinkregel/rebase-indexer releases). Only Apple Silicon Macs are
+ *  supported — there is no Intel (x86_64) macOS indexer build. */
 export function indexerAsset(platformName?: string, arch?: string): string {
   const p = (platformName ?? '').toLowerCase()
   const a = (arch ?? '').toLowerCase()
@@ -75,7 +76,12 @@ export function indexerAsset(platformName?: string, arch?: string): string {
     // The agent-side cache path + chmod assume a unix host.
     throw new Error('Crucible has no indexer build for Windows agents yet')
   }
-  if (p.includes('darwin') || p.includes('mac')) return isArm ? 'rebase-indexer-macos-arm64' : 'rebase-indexer-macos-x86_64'
+  if (p.includes('darwin') || p.includes('mac')) {
+    if (!isArm) {
+      throw new Error('Intel Macs are not supported — Crucible indexing requires Apple Silicon')
+    }
+    return 'rebase-indexer-macos-arm64'
+  }
   return isArm ? 'rebase-indexer-linux-arm64' : 'rebase-indexer-linux-x86_64'
 }
 

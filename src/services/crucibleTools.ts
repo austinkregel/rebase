@@ -1,4 +1,5 @@
 import { fileService } from '@/services/fileService'
+import { readTextForAgent } from '@/services/fileContent'
 import { retrieve, type Hit } from '@/services/crucible'
 import { isWindowsPath } from '@/services/paths'
 import type { Surfaced } from '@/services/crucibleState'
@@ -351,10 +352,18 @@ export function argSchemaFor(name: string, surfaced: Surfaced): JsonSchema | nul
         required: ['path', 'old_text', 'new_text'],
       }
     case 'write_file':
+      // `path` is intentionally NOT enum-constrained: write_file legitimately
+      // creates a *new* file addressed by full path (parent dir listed + valid
+      // leaf, per resolveWriteTarget), so locking it to already-surfaced files
+      // would force every new-file create onto an existing file. resolveWriteTarget
+      // still gates the target deterministically, so this stays defense-in-depth.
       return {
         type: 'object',
         properties: {
-          path: { enum: files, description: 'An existing surfaced file to overwrite.' },
+          path: {
+            type: 'string',
+            description: 'A file to write — an existing surfaced file to overwrite, or a new file in a directory you listed.',
+          },
           dir: { enum: dirs, description: 'A directory you listed, to create a new file in.' },
           name: { type: 'string', description: 'Leaf filename for a new file (no separators).' },
           content: { type: 'string', description: 'Full file content.' },
@@ -396,17 +405,21 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
   switch (name) {
     case 'read_file': {
       const abs = resolveInScope(ctx.roots, str('path'))
-      const content = await fileService.read(ctx.clientId, abs)
+      const { text, binary, size, mime } = await readTextForAgent(ctx.clientId, abs)
       // Surfaced: reading a file authorizes a later edit of it.
       ctx.surfaced.files.add(abs)
+      // Binary/oversized/special files return a stub, never mojibake in the prompt.
+      if (binary) {
+        return { output: `[binary file${size >= 0 ? `, ${size} bytes` : ''}, ${mime} — not shown as text]` }
+      }
       const start = num('start_line')
       const end = num('end_line')
       if (start || end) {
-        const lines = content.split('\n')
+        const lines = text.split('\n')
         const slice = lines.slice((start ?? 1) - 1, end ?? lines.length)
         return { output: clip(slice.join('\n')) }
       }
-      return { output: clip(content) }
+      return { output: clip(text) }
     }
     case 'list_files': {
       const abs = resolveInScope(ctx.roots, str('path'))
@@ -491,7 +504,9 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
       // one in a directory we've listed. Throws (before approval) otherwise.
       const { abs, display } = resolveWriteTarget(ctx, args)
       const content = str('content')
-      const old = await fileService.read(ctx.clientId, abs).catch(() => '')
+      const old = await readTextForAgent(ctx.clientId, abs)
+        .then((r) => r.text)
+        .catch(() => '')
       const diff = unifiedDiff(old, content, display)
       if ((await ctx.approve({ name, summary: `Write ${display}`, diff })) === 'deny') {
         throw new Error('edit denied by the user')
@@ -511,11 +526,17 @@ export async function runTool(name: string, args: Record<string, unknown>, ctx: 
       }
       const oldText = str('old_text')
       const newText = str('new_text')
-      const content = await fileService.read(ctx.clientId, abs)
+      const { text: content, binary } = await readTextForAgent(ctx.clientId, abs)
+      if (binary) {
+        throw new Error(`refusing to edit ${str('path')}: not an editable text file`)
+      }
       if (!content.includes(oldText)) {
         throw new Error(`old_text not found in ${str('path')}`)
       }
-      const updated = content.replace(oldText, newText)
+      // Function replacer so `$&`, `$1`, … in new_text are inserted literally
+      // (a plain string replacement treats them as special patterns). old_text is
+      // meant to be unique; first-match semantics are kept intentionally.
+      const updated = content.replace(oldText, () => newText)
       const diff = unifiedDiff(content, updated, str('path'))
       if ((await ctx.approve({ name, summary: `Edit ${str('path')}`, diff })) === 'deny') {
         throw new Error('edit denied by the user')
