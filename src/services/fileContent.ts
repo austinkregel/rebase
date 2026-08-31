@@ -18,12 +18,16 @@ import type { DirListEntry } from '@/transport/types'
 export const FILE_LIMITS = {
   /** Bytes scanned by the content sniffer for text-vs-binary. */
   probeBytes: 64 * 1024,
-  /** A clean-UTF-8 file at/under this is editable; larger text is read-only. */
+  /** A clean-UTF-8 file at/under this is editable; larger text is read-only.
+   *  Kept under the agent's whole-file file_get limit (compute-agent
+   *  fileGetMaxBytes = 32 MiB) so an in-cap file always reads. */
   editableMaxBytes: 25 * 1024 * 1024,
   /** Read-only text preview page size (paged fully once ranged reads land). */
   textPreviewBytes: 2 * 1024 * 1024,
-  /** Blob-building binary viewers (image/media) ceiling. */
-  binaryViewerMaxBytes: 50 * 1024 * 1024,
+  /** Blob-building binary viewers (image/media) ceiling. Matches the agent's
+   *  32 MiB whole-file file_get limit — beyond it the agent rejects the read, so
+   *  classify as too-large and show a clean banner instead of a failed round-trip. */
+  binaryViewerMaxBytes: 32 * 1024 * 1024,
   /** Hex viewer page size. */
   hexPageBytes: 16 * 1024,
   /** Per-entry preview inside the zip viewer. */

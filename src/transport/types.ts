@@ -22,9 +22,6 @@ export interface PublicClient {
   home?: string
   cpus?: string
   agentVersion?: string
-  /** Feature flags the agent advertises, e.g. "file_get.range", "file_append",
-   *  "file_patch". Absent ⇒ assume the base (whole-file) protocol only. */
-  capabilities?: string[]
   /** Direct-connection advertisement (present when the agent exposes a P2P endpoint). */
   directAddr?: string
   directCertSha256?: string
@@ -99,6 +96,16 @@ export interface AlertSnapshot {
 }
 
 /** The `data` object of a `stats` frame. */
+/** One entry of the agent's capability registry (arrives in `stats.capabilities`,
+ *  keyed by capability name, e.g. "docker", "battery", "telephony"). This is the
+ *  generic "is X supported" discovery signal features gate on. */
+export interface CapabilityInfo {
+  state: 'unavailable' | 'available' | 'enabled'
+  detail?: string
+  features?: string[]
+  meta?: Record<string, unknown>
+}
+
 export interface StatsData {
   cpu?: number
   mem?: MemInfo
@@ -111,6 +118,8 @@ export interface StatsData {
   cpus?: number
   uptimeSec?: number
   ts?: string
+  /** Capability registry snapshot, keyed by capability name. */
+  capabilities?: Record<string, CapabilityInfo>
 }
 
 /** Payload of an `alerts` frame (control plane re-broadcasts the agent's snapshot). */

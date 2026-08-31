@@ -17,17 +17,20 @@ implement it" (as `file_get_dispatched` does today).
 
 ## Capability advertisement (do this first)
 
-Add a `capabilities` string array to each agent's entry in the `client_list`
-payload (`PublicClient`):
+Advertise support through the **existing capability registry** the agent already
+reports in its `stats` frame (`stats.capabilities`, keyed by capability name with
+`{ state, features }`) — the same generic discovery signal Docker/battery/
+telephony use. Add a `file` capability whose `features` list the byte-level
+primitives implemented:
 
 ```json
-{ "clientId": "...", "capabilities": ["file_get.range", "file_append", "file_patch"] }
+{ "capabilities": { "file": { "state": "enabled", "features": ["range", "append", "patch"] } } }
 ```
 
-The client gates every affordance on this (`supports(clientId, cap)`) and, when a
-capability is absent, shows an explicit "redeploy the agent" error **instead of
-attempting the operation** — there is no silent fallback. Absent/empty ⇒ the
-base whole-file protocol only.
+The client gates every affordance on this (`supports(clientId, "file")` +
+`capabilityFeatures(clientId, "file")`) and, when a feature is absent, shows an
+explicit "redeploy the agent" error **instead of attempting the operation** —
+there is no silent fallback. Absent ⇒ the base whole-file protocol only.
 
 `errorCode` (machine-readable, on any `*_result` with `ok:false`):
 `not_found | is_dir | permission | too_large | range_unsupported |
@@ -35,7 +38,7 @@ stale_precondition | inplace_requires_equal_length | io`.
 
 ---
 
-## Phase B — ranged READ (`file_get.range`) → view any size
+## Phase B — ranged READ (`file` capability, `range` feature) → view any size
 
 Extend the existing `file_get` flow with a client-requested window.
 

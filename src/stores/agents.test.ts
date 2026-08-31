@@ -63,16 +63,19 @@ describe('agents store — reachability', () => {
     expect(agents.isOnline('c2')).toBe(false)
   })
 
-  it('supports() reflects an agent’s advertised capabilities', () => {
+  it('supports()/capabilityFeatures() reflect the stats.capabilities registry', () => {
     const agents = useAgentsStore()
-    agents.agents = [
-      { clientId: 'c1', authenticated: true, capabilities: ['file_get.range'] },
-      { clientId: 'c2', authenticated: true },
-    ] as never
-    expect(agents.supports('c1', 'file_get.range')).toBe(true)
-    expect(agents.supports('c1', 'file_patch')).toBe(false)
-    expect(agents.supports('c2', 'file_get.range')).toBe(false)
-    expect(agents.supports(null, 'file_get.range')).toBe(false)
+    agents.stats = {
+      c1: { capabilities: { file: { state: 'enabled', features: ['range', 'append'] } } },
+      c2: { capabilities: { file: { state: 'available' } } },
+    } as never
+    expect(agents.supports('c1', 'file')).toBe(true)
+    expect(agents.supports('c2', 'file')).toBe(false) // available, not enabled
+    expect(agents.supports('c2', 'file', 'available')).toBe(true)
+    expect(agents.supports('c1', 'docker')).toBe(false)
+    expect(agents.supports(null, 'file')).toBe(false)
+    expect(agents.capabilityFeatures('c1', 'file')).toEqual(['range', 'append'])
+    expect(agents.capabilityFeatures('c2', 'file')).toEqual([])
   })
 
   it('drops the client_list when the socket closes', () => {

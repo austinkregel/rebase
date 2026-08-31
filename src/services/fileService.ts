@@ -28,8 +28,9 @@ const CHUNK_BYTES = 256 * 1024
 const LIST_TIMEOUT_MS = 20_000
 const READ_TIMEOUT_MS = 30_000
 /** Ceiling for binary viewer reads — the whole file buffers in memory to build
- *  a Blob URL, so cap it. Text reads are unbounded (source files are small). */
-const MAX_BINARY_BYTES = 50 * 1024 * 1024
+ *  a Blob URL, and the agent rejects a whole-file read over its 32 MiB
+ *  fileGetMaxBytes limit, so cap at that. Text reads are capped separately. */
+const MAX_BINARY_BYTES = 32 * 1024 * 1024
 /** Upload result timeout: the single deadline must cover streaming every chunk,
  *  the agent's disk write, and the finish round-trip — so scale it with size on
  *  top of a floor, instead of the fixed 20s that fails large uploads. */
@@ -150,10 +151,12 @@ export class FileService {
 
   /**
    * Read a byte window `[offset, offset+length)` of a file. Requires an agent
-   * advertising the `file_get.range` capability — callers MUST gate on
-   * `useAgentsStore().supports(clientId, 'file_get.range')` first; this method
+   * that implements ranged file_get (advertised in `stats.capabilities`, e.g. a
+   * "file" capability listing a "range" feature) — callers should gate on
+   * `useAgentsStore().supports(...)`/`capabilityFeatures(...)` first. This method
    * additionally rejects loudly if the agent turns out to have ignored the range
-   * (streamed the whole file) rather than silently returning wrong data.
+   * (streamed the whole file) rather than silently returning wrong data. The
+   * ranged wire contract is docs/PROTOCOL-RANGED-IO.md.
    */
   async readRange(
     clientId: string,

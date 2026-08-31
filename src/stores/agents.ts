@@ -90,14 +90,26 @@ export const useAgentsStore = defineStore('agents', {
         clientId,
     statsFor: (state) => (clientId: string) => state.stats[clientId],
     alertsFor: (state) => (clientId: string) => state.alerts[clientId],
-    /** Whether an agent advertises a protocol capability (e.g. "file_get.range").
-     *  Absent capabilities ⇒ false, so callers surface an explicit "unsupported"
-     *  error rather than silently attempting an operation the agent can't serve. */
+    /** Whether an agent reports a capability at or above `min` state — the
+     *  generic discovery signal from `stats.capabilities`. Absent ⇒ false, so
+     *  callers surface an explicit "unsupported" error rather than silently
+     *  attempting an operation the agent can't serve. Mirrors the control-plane
+     *  client's `clientHasCapability`. */
     supports:
       (state) =>
-      (clientId: string | null, capability: string): boolean =>
-        !!clientId &&
-        !!state.agents.find((a) => a.clientId === clientId)?.capabilities?.includes(capability),
+      (clientId: string | null, name: string, min: 'available' | 'enabled' = 'enabled'): boolean => {
+        if (!clientId) return false
+        const info = state.stats[clientId]?.capabilities?.[name]
+        if (!info) return false
+        return min === 'available'
+          ? info.state === 'available' || info.state === 'enabled'
+          : info.state === 'enabled'
+      },
+    /** The feature list a capability advertises (e.g. ["range","append"]), or []. */
+    capabilityFeatures:
+      (state) =>
+      (clientId: string | null, name: string): string[] =>
+        (clientId && state.stats[clientId]?.capabilities?.[name]?.features) || [],
     /** Agents sorted alphabetically by hostname (then clientId as tiebreak). */
     sortedAgents: (state) =>
       [...state.agents].sort((a, b) => {
