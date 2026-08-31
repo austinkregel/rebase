@@ -43,18 +43,22 @@ export function parseGitStatus(stdout: string): GitState {
 export const useGitStore = defineStore('git', {
   state: () => ({
     byClient: {} as Record<string, GitState | null>,
-    loading: false,
+    // Per-client so concurrent refreshes of different servers don't clobber a
+    // single shared flag (one finishing would clear the spinner for all).
+    loading: {} as Record<string, boolean>,
   }),
 
   getters: {
     statusFor: (state) => (clientId: string | null) =>
       clientId ? state.byClient[clientId] ?? null : null,
+    isLoading: (state) => (clientId: string | null) =>
+      clientId ? state.loading[clientId] ?? false : false,
   },
 
   actions: {
     async refresh(clientId: string | null, path: string) {
       if (!clientId || !path) return
-      this.loading = true
+      this.loading[clientId] = true
       try {
         const res = await fileService.exec(clientId, GIT_STATUS_COMMAND, path)
         // code 0 = a git repo; anything else (128 not-a-repo, 126 blocked) → unknown.
@@ -62,7 +66,7 @@ export const useGitStore = defineStore('git', {
       } catch {
         // Leave the previous value; a transient relay/timeout shouldn't clear it.
       } finally {
-        this.loading = false
+        this.loading[clientId] = false
       }
     },
 

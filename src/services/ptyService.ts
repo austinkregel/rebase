@@ -42,16 +42,27 @@ function installListeners(): void {
   socket.on('shell_started', (data) => {
     const started = data as unknown as ShellStarted
     const p = pendingOpens.find((x) => x.clientId === started.clientId)
-    if (!p) return
+    if (!p) {
+      // No pending open — the opener already timed out and gave up, so this
+      // server PTY is now orphaned. Tell the server to tear it down instead of
+      // leaking a live shell nobody is attached to.
+      console.debug(`[pty] orphaned shell_started session=${started.session} clientId=${started.clientId} (no pending open) — closing`)
+      socket.emit('shell_close', { session: started.session })
+      return
+    }
     settle(p)
     console.debug(`[pty] shell_started session=${started.session} clientId=${started.clientId}`)
     p.resolve(makeSession(started))
   })
   socket.on('shell_error', (data) => {
-    // shell_error carries no clientId/session — fail the oldest pending open.
+    // shell_error carries no clientId/session, so we can't tell which agent
+    // failed. Reject the MOST-RECENT pending open as the best available
+    // heuristic (an error usually follows the request that just went out).
+    // Proper fix needs a request id on `shell_start` — a protocol follow-up
+    // (see docs/PROTOCOL.md).
     const message = (data as unknown as ShellError).message ?? 'shell error'
     console.warn(`[pty] shell_error: ${message}`)
-    const p = pendingOpens[0]
+    const p = pendingOpens[pendingOpens.length - 1]
     if (p) {
       settle(p)
       p.reject(new Error(message))

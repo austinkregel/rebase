@@ -74,7 +74,14 @@ export async function activatePlugins(plugins: RebasePlugin[], host: HostCapabil
       // others (which would silently drop their views/menus/status items). Roll
       // back this plugin's partial contributions and carry on.
       console.error(`[plugins] failed to activate "${plugin.id}"`, err)
-      disposers.forEach((d) => d())
+      disposers.forEach((d) => {
+        // A throwing disposer must not abort rollback of the rest.
+        try {
+          d()
+        } catch (e) {
+          console.error(`[plugins] disposer threw while rolling back "${plugin.id}"`, e)
+        }
+      })
       active.delete(plugin.id)
     }
   }
@@ -88,7 +95,15 @@ export function deactivatePlugins(): void {
     } catch {
       /* ignore */
     }
-    disposers.forEach((d) => d())
+    disposers.forEach((d) => {
+      // One throwing disposer must not abort teardown of the remaining plugins
+      // or skip active.clear() below.
+      try {
+        d()
+      } catch (e) {
+        console.error(`[plugins] disposer threw while deactivating "${plugin.id}"`, e)
+      }
+    })
   }
   active.clear()
 }

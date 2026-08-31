@@ -30,14 +30,20 @@ describe('defaultRootForPlatform', () => {
 })
 
 describe('isWindowsPath', () => {
-  it('recognizes drive letters and backslashes', () => {
+  it('recognizes drive letters', () => {
     expect(isWindowsPath('C:\\')).toBe(true)
     expect(isWindowsPath('D:\\Users\\me')).toBe(true)
-    expect(isWindowsPath('relative\\thing')).toBe(true)
+    expect(isWindowsPath('c:/mixed/slashes')).toBe(true)
   })
   it('treats posix paths as non-Windows', () => {
     expect(isWindowsPath('/')).toBe(false)
     expect(isWindowsPath('/home/me')).toBe(false)
+  })
+  it('does not misclassify a POSIX path containing a backslash', () => {
+    // A backslash is a legal filename character on POSIX; only a drive letter
+    // makes a path Windows-style.
+    expect(isWindowsPath('/tmp/weird\\name')).toBe(false)
+    expect(isWindowsPath('relative\\thing')).toBe(false)
   })
 })
 

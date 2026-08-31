@@ -43,10 +43,19 @@ export const useSessionStore = defineStore('session', {
     },
 
     async refreshAuth() {
-      this.phase = 'loading'
       this.error = null
       try {
         const info = await platform.authStatus()
+        // A mid-session auth change (e.g. a deep-link callback landing while the
+        // app is already attached) must not knock a live connection offline. If
+        // we're still connected with the socket open, just re-read the CP list
+        // and leave `phase`/the socket untouched.
+        if (info.authenticated && this.phase === 'connected' && this.socketStatus === 'open') {
+          this.authenticated = true
+          this.controlPlanes = await platform.listControlPlanes().catch(() => [])
+          return
+        }
+        this.phase = 'loading'
         this.authenticated = info.authenticated
         if (!info.authenticated) {
           this.phase = 'unauthenticated'

@@ -56,12 +56,21 @@ const tabs = computed<TabEntry[]>(() => [
 // and nothing outside it could switch tabs.
 const selectedIndex = ref(0)
 
-// When a conditional tab disappears (leaving project mode) the selected index can
-// fall off the end or onto a different tab; clamp it back to the Files tab.
+// When a conditional tab disappears (leaving project mode) the tab list shifts,
+// so a purely index-based clamp can land on the wrong tab. Track the selected
+// tab's *id* across changes: resolve it from the previous list, then follow it
+// into the new list, falling back to the Files tab when it's gone.
 watch(
-  () => tabs.value.length,
-  (len) => {
-    if (selectedIndex.value >= len) selectedIndex.value = 0
+  tabs,
+  (next, prev) => {
+    const selectedId = prev?.[selectedIndex.value]?.id
+    const i = selectedId ? next.findIndex((t) => t.id === selectedId) : -1
+    if (i >= 0) {
+      selectedIndex.value = i
+    } else {
+      const files = next.findIndex((t) => t.id === filesTab.id)
+      selectedIndex.value = files >= 0 ? files : 0
+    }
   },
 )
 

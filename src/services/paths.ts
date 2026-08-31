@@ -11,9 +11,13 @@ export function isWindowsPlatform(platform?: string): boolean {
   return !!platform && /windows/i.test(platform)
 }
 
-/** True when a path string is Windows-style (drive-letter or backslashes). */
+/**
+ * True when a path string is Windows-style. Keyed on a leading drive letter
+ * (`C:`) only — a bare backslash is a legal filename character on POSIX, so
+ * `path.includes('\\')` would misclassify e.g. `/tmp/a\b` as Windows.
+ */
 export function isWindowsPath(path: string): boolean {
-  return /^[A-Za-z]:/.test(path) || path.includes('\\')
+  return /^[A-Za-z]:/.test(path)
 }
 
 /** Default filesystem root to browse for an agent's reported platform. */

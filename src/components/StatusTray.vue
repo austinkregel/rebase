@@ -63,7 +63,7 @@ function refreshGit() {
       v-if="session.activeClientId"
       class="flex items-center gap-1 text-muted hover:text-fg disabled:opacity-50"
       :title="git ? 'git status — click to refresh' : 'fetch git status'"
-      :disabled="gitStore.loading"
+      :disabled="gitStore.isLoading(session.activeClientId)"
       @click="refreshGit"
     >
       <span v-if="git">⎇ {{ git.branch || 'detached' }}<span v-if="git.dirty" class="text-yellow"> ✎{{ git.dirty }}</span></span>
