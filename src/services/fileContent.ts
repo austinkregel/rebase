@@ -10,23 +10,20 @@ import type { DirListEntry } from '@/transport/types'
  * wire adapter (bytes on/off the socket); THIS module decides — from metadata
  * plus a content sniff, never the filename alone — how a file may be opened:
  * editable text, a content viewer, read-only hex, a bounded preview, or not at
- * all. It is the single guard against the historical hazard of decoding a binary
- * file into an editable UTF-8 buffer and corrupting it on save.
+ * all. Only clean, losslessly-UTF-8 text within the size cap is editable, so a
+ * binary file is never decoded into a buffer a save could corrupt.
  */
 
 /** One place for every read/preview ceiling (replaces scattered constants). */
 export const FILE_LIMITS = {
   /** Bytes scanned by the content sniffer for text-vs-binary. */
   probeBytes: 64 * 1024,
-  /** A clean-UTF-8 file at/under this is editable; larger text is read-only.
-   *  Kept under the agent's whole-file file_get limit (compute-agent
-   *  fileGetMaxBytes = 32 MiB) so an in-cap file always reads. */
+  /** A clean-UTF-8 file at/under this is editable; larger text is read-only. */
   editableMaxBytes: 25 * 1024 * 1024,
-  /** Read-only text preview page size (paged fully once ranged reads land). */
+  /** Read-only text preview page size. */
   textPreviewBytes: 2 * 1024 * 1024,
-  /** Blob-building binary viewers (image/media) ceiling. Matches the agent's
-   *  32 MiB whole-file file_get limit — beyond it the agent rejects the read, so
-   *  classify as too-large and show a clean banner instead of a failed round-trip. */
+  /** Ceiling for blob-building binary viewers (image/media); a file over this is
+   *  classified too-large and shown with a banner rather than read. */
   binaryViewerMaxBytes: 32 * 1024 * 1024,
   /** Hex viewer page size. */
   hexPageBytes: 16 * 1024,

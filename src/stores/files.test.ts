@@ -9,8 +9,8 @@ vi.mock('@/services/fileService', () => ({
     rename: vi.fn(async () => {}),
     delete: vi.fn(async () => {}),
     read: vi.fn(async () => ''),
-    // openFile now classifies via fileContent.resolveOpen: stat (unknown here)
-    // then readBytes → empty bytes sniff as clean/editable text.
+    // openFile classifies via fileContent.resolveOpen: stat (unknown here) then
+    // readBytes, whose empty bytes sniff as clean, editable text.
     stat: vi.fn(async () => null),
     readBytes: vi.fn(async () => new Uint8Array()),
   },
@@ -188,7 +188,7 @@ describe('files store — offline agents', () => {
   })
 })
 
-describe('files store — open-file identity is per (server, path) (H3)', () => {
+describe('files store — open-file identity is per (server, path)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     useAgentsStore().onSocketStatus('open')
@@ -237,7 +237,7 @@ describe('files store — open-file identity is per (server, path) (H3)', () => 
   })
 })
 
-describe('files store — content classification gates editing (hazard fix)', () => {
+describe('files store — content classification gates editing', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     useAgentsStore().onSocketStatus('open')
@@ -268,7 +268,7 @@ describe('files store — content classification gates editing (hazard fix)', ()
   })
 })
 
-describe('files store — directory rename/remove remaps descendants (M6)', () => {
+describe('files store — directory rename/remove remaps descendants', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     useAgentsStore().onSocketStatus('open')

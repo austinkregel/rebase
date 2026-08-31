@@ -126,10 +126,10 @@ const components = {
 const tabComponents = {
   editorTab: markRaw(EditorTab),
 }
-// v3: panel ids are now the composite fileKey(clientId, path), not the raw path,
-// so open files are identified per-server. Older layouts (editor.v2*) hold
-// path-only ids that would no longer reconcile, so they are intentionally not
-// migrated — the editor layout resets once and reopens from panel params.
+// Panel ids are the composite fileKey(clientId, path), so open files are
+// identified per-server. A layout persisted under an earlier key is not migrated
+// (its ids can't reconcile); the editor area starts empty and reopens from
+// panel params.
 const LAYOUT_KEY = 'editor.v3'
 
 /** Persistence key for the current editor layout. In project mode each project

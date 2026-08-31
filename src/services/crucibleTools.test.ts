@@ -27,7 +27,7 @@ vi.mock('@/services/fileService', () => ({
       if (files.has(abs)) return files.get(abs)!
       throw new Error('not found')
     }),
-    // read_file now routes through fileContent.readTextForAgent → stat + readBytes.
+    // read_file routes through fileContent.readTextForAgent (stat + readBytes).
     stat: vi.fn(async () => null),
     readBytes: vi.fn(async (_c: string, abs: string) => {
       if (files.has(abs)) return new TextEncoder().encode(files.get(abs)!)
@@ -418,7 +418,7 @@ describe('argSchemaFor — Phase-B schema is built from the surfaced set (#3)', 
   it('write_file leaves `path` free-form (new-file creates) but constrains the new-file dir to dirs', () => {
     const s = argSchemaFor('write_file', surfaced)!
     // `path` is intentionally NOT enum-constrained: a new file addressed by full
-    // path must be expressible (M13). resolveWriteTarget still gates the target.
+    // path must be expressible. resolveWriteTarget still gates the target.
     expect(s.properties!.path.enum).toBeUndefined()
     expect(s.properties!.path.type).toBe('string')
     expect(s.properties!.dir.enum).toEqual(['/p/src'])
@@ -463,7 +463,7 @@ describe('needsArgSynthesis — the adaptive Phase-B trigger (#3)', () => {
     expect(needsArgSynthesis(s, { dir: '/p/elsewhere', name: 'x.ts', content: 'z' })).toBe(true)
   })
 
-  it('does NOT fire for a write_file new-file path outside the surfaced set (M13)', () => {
+  it('does NOT fire for a write_file new-file path outside the surfaced set', () => {
     // A legitimate new-file create by full path must not be forced into Phase-B
     // arg synthesis (which would redirect it onto an existing surfaced file).
     const s = argSchemaFor('write_file', surfaced)!

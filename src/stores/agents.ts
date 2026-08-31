@@ -93,8 +93,7 @@ export const useAgentsStore = defineStore('agents', {
     /** Whether an agent reports a capability at or above `min` state — the
      *  generic discovery signal from `stats.capabilities`. Absent ⇒ false, so
      *  callers surface an explicit "unsupported" error rather than silently
-     *  attempting an operation the agent can't serve. Mirrors the control-plane
-     *  client's `clientHasCapability`. */
+     *  attempting an operation the agent can't serve. */
     supports:
       (state) =>
       (clientId: string | null, name: string, min: 'available' | 'enabled' = 'enabled'): boolean => {

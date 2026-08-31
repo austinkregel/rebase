@@ -28,8 +28,7 @@ const CHUNK_BYTES = 256 * 1024
 const LIST_TIMEOUT_MS = 20_000
 const READ_TIMEOUT_MS = 30_000
 /** Ceiling for binary viewer reads — the whole file buffers in memory to build
- *  a Blob URL, and the agent rejects a whole-file read over its 32 MiB
- *  fileGetMaxBytes limit, so cap at that. Text reads are capped separately. */
+ *  a Blob URL, so cap it. Text reads are capped separately. */
 const MAX_BINARY_BYTES = 32 * 1024 * 1024
 /** Upload result timeout: the single deadline must cover streaming every chunk,
  *  the agent's disk write, and the finish round-trip — so scale it with size on

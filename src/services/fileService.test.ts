@@ -46,18 +46,17 @@ beforeEach(() => {
   h.state.emitOk = () => true
 })
 
-describe('writeTimeoutFor (H1)', () => {
+describe('writeTimeoutFor', () => {
   it('scales the upload deadline with size on top of a floor', () => {
     const small = writeTimeoutFor(0)
     const large = writeTimeoutFor(500 * 1024 * 1024)
     expect(small).toBeGreaterThanOrEqual(30_000)
-    // A 500 MB upload must get far more than the old fixed 20s.
     expect(large).toBeGreaterThan(small)
     expect(large).toBeGreaterThan(60_000)
   })
 })
 
-describe('writeBytes (M2)', () => {
+describe('writeBytes', () => {
   it('rejects cleanly when a chunk emit fails mid-stream (no unhandled rejection)', async () => {
     // Start + finish sends succeed; the chunk send fails.
     h.state.emitOk = (event) => event !== 'file_put_chunk'
@@ -68,7 +67,7 @@ describe('writeBytes (M2)', () => {
   })
 })
 
-describe('readBytes (M3)', () => {
+describe('readBytes', () => {
   it('aborts as soon as streamed chunks exceed maxBytes, before the result frame', async () => {
     const p = fileService.readBytes('c1', '/big.bin', 10)
     // Two 8-byte chunks = 16 bytes > the 10-byte cap → abort during accumulation.
@@ -86,7 +85,7 @@ describe('readBytes (M3)', () => {
   })
 })
 
-describe('readRange (Phase B — ranged reads)', () => {
+describe('readRange', () => {
   it('sends offset/length and returns the window metadata', async () => {
     const p = fileService.readRange('c1', '/big.log', 100, 50)
     expect(h.state.lastPayload).toMatchObject({ path: '/big.log', offset: 100, length: 50 })

@@ -21,9 +21,8 @@ type ExpandedByClient = Record<string, string[]>
  * Composite identity for an open file: a *server's* file, not just a path. The
  * Project explorer shows roots from several servers at once, so the same
  * absolute path can be open on two agents — keying by path alone collides
- * (opening /etc/hosts on B would surface A's buffer). Mirrors the `\0` key
- * convention used elsewhere (ProjectsManager). This string is also the Dockview
- * panel id, so `activeKey` and a panel id are interchangeable.
+ * (opening /etc/hosts on B would surface A's buffer). This string is also the
+ * Dockview panel id, so `activeKey` and a panel id are interchangeable.
  */
 export function fileKey(clientId: string, path: string): string {
   return `${clientId}\0${path}`
@@ -72,7 +71,7 @@ export interface OpenFile {
   reason?: string
   /** Id of the content-aware viewer rendering this file (undefined → editor). */
   viewerId?: string
-  /** Convenience mirror of `!editable` for existing call sites. */
+  /** Mirror of `!editable`. */
   readOnly?: boolean
 }
 
@@ -253,8 +252,8 @@ export const useFilesStore = defineStore('files', {
       }
       // Placeholder buffer; fileContent.resolveOpen classifies the file (from
       // metadata + a content sniff, never the extension alone) and returns text
-      // only for clean, editable text — so a binary/unknown file can no longer
-      // land in an editable buffer and be corrupted on save.
+      // only for clean, editable text. Binary/unknown content stays read-only
+      // (empty buffer) so a save can't corrupt it.
       const file: OpenFile = {
         path,
         clientId,

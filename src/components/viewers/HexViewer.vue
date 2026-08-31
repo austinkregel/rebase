@@ -5,8 +5,7 @@ import { FILE_LIMITS } from '@/services/fileContent'
 
 // Read-only hex/ASCII view for binary (or lossy-text) files that have no
 // content viewer. Selected by the store's file classification (kind
-// 'binary-hex'), never by extension. Phase 0 renders a bounded prefix; true
-// paging arrives with ranged reads.
+// 'binary-hex'), never by extension. Renders a bounded prefix of the file.
 const props = defineProps<{ path: string; clientId: string; size?: number }>()
 
 // makeUrl:false — we want the raw bytes, not a Blob URL.
