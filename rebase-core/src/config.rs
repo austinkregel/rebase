@@ -71,11 +71,15 @@ impl ControlPlane {
         })
     }
 
-    /// Browser sign-in URL for the GUI / CLI `auth login` flow.
-    pub fn auth_login_url(&self) -> Result<String> {
+    /// Browser sign-in URL for the GUI / CLI `auth login` flow. `state` is a
+    /// caller-generated CSRF token echoed back on the `rebase://callback`
+    /// redirect (once the control plane preserves it) and matched by the
+    /// deep-link handler against the pending-login record.
+    pub fn auth_login_url(&self, state: &str) -> Result<String> {
         let base = self.http_base()?;
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("redirect", "rebase://callback")
+            .append_pair("state", state)
             .finish();
         Ok(format!("{base}/auth/app?{query}"))
     }

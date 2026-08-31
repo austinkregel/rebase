@@ -6300,6 +6300,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml 0.8.2",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -6315,6 +6316,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

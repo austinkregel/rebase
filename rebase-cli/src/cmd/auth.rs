@@ -4,6 +4,7 @@ use clap::Subcommand;
 use rebase_core::{
     config::AppConfig,
     oidc::Auth,
+    pending_login,
     tokens::{self, Credential},
 };
 
@@ -19,6 +20,12 @@ pub enum AuthCmd {
     },
     /// Remove stored credentials
     Logout,
+    /// Show the recent local auth audit log (logins started, completed, rejected)
+    Log {
+        /// Maximum number of entries to show (most recent last)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Store a static token or machine client credentials (for CI / headless use)
     Credentials {
         #[arg(long, help = "Static access token")]
@@ -35,6 +42,7 @@ pub async fn run(cmd: AuthCmd) -> Result<()> {
         AuthCmd::Status => status().await,
         AuthCmd::Login { control_plane } => login(control_plane),
         AuthCmd::Logout => logout(),
+        AuthCmd::Log { limit } => show_log(limit),
         AuthCmd::Credentials { token, client_id, client_secret } => {
             credentials(token, client_id, client_secret)
         }
@@ -77,7 +85,11 @@ fn login(control_plane: Option<String>) -> Result<()> {
             .first()
             .ok_or_else(|| anyhow::anyhow!("no control planes configured"))?,
     };
-    let url = cp.auth_login_url()?;
+    // Record the login we're about to start so the app's deep-link callback
+    // handler can match it (the callback always lands in the app process).
+    let state = uuid::Uuid::new_v4().to_string();
+    pending_login::write(&state)?;
+    let url = cp.auth_login_url(&state)?;
     println!("Opening {url}");
     println!("Complete sign-in in your browser. The token is stored in the OS keychain and");
     println!("shared between the Rebase app and this CLI.");
@@ -88,6 +100,21 @@ fn login(control_plane: Option<String>) -> Result<()> {
 fn logout() -> Result<()> {
     tokens::clear()?;
     println!("signed out");
+    Ok(())
+}
+
+fn show_log(limit: usize) -> Result<()> {
+    let entries = pending_login::read_log(limit);
+    if entries.is_empty() {
+        println!("no auth events recorded");
+        return Ok(());
+    }
+    for e in entries {
+        match e.reason {
+            Some(reason) => println!("{}\t{}\t{}", e.ts, e.event, reason),
+            None => println!("{}\t{}", e.ts, e.event),
+        }
+    }
     Ok(())
 }
 

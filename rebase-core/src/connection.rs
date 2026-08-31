@@ -17,30 +17,17 @@ pub struct DialPlan {
 
 pub fn plan_for(profile: &Profile, bearer: Option<String>) -> Result<DialPlan> {
     match profile.mode {
-        ConnectionMode::Direct => {
-            let connector = match &profile.cert_sha256 {
-                Some(pin) => {
-                    let fingerprint = parse_fingerprint(pin)?;
-                    let config = rustls::ClientConfig::builder()
-                        .dangerous()
-                        .with_custom_certificate_verifier(Arc::new(PinnedVerifier {
-                            fingerprint,
-                            provider: rustls::crypto::ring::default_provider(),
-                        }))
-                        .with_no_client_auth();
-                    Some(Connector::Rustls(Arc::new(config)))
-                }
-                None => None,
-            };
-            Ok(DialPlan {
-                url: profile.ws_url.clone(),
-                connector,
-                bearer,
-            })
-        }
+        ConnectionMode::Direct => Ok(DialPlan {
+            url: profile.ws_url.clone(),
+            connector: pinned_connector(profile.cert_sha256.as_deref())?,
+            bearer,
+        }),
+        // Relay mode also honors a configured pin: `as_relay_profile` copies
+        // `cert_sha256` from the control-plane entry, so a self-signed control
+        // plane reached over the relay leg is pinned exactly like a direct one.
         ConnectionMode::Relay => Ok(DialPlan {
             url: profile.ws_url.clone(),
-            connector: None,
+            connector: pinned_connector(profile.cert_sha256.as_deref())?,
             bearer,
         }),
     }
@@ -48,7 +35,23 @@ pub fn plan_for(profile: &Profile, bearer: Option<String>) -> Result<DialPlan> {
 
 #[allow(dead_code)]
 pub fn direct_plan(ws_url: &str, cert_sha256: Option<&str>, bearer: Option<String>) -> Result<DialPlan> {
-    let connector = match cert_sha256 {
+    Ok(DialPlan {
+        url: ws_url.to_string(),
+        connector: pinned_connector(cert_sha256)?,
+        bearer,
+    })
+}
+
+/// Build a rustls `Connector` that pins the server's leaf certificate to the
+/// given SHA-256 fingerprint (hex). Returns `Ok(None)` when no pin is set (or it
+/// is blank), in which case the caller falls back to the platform's native roots.
+///
+/// NOTE: the resulting `PinnedVerifier` checks ONLY the leaf certificate's
+/// SHA-256 and deliberately ignores hostname and expiry. That is correct for a
+/// deliberately pinned self-signed cert (see docs/DIRECT-MODE.md) and must not
+/// be reused as a general-purpose certificate verifier.
+fn pinned_connector(cert_sha256: Option<&str>) -> Result<Option<Connector>> {
+    match cert_sha256 {
         Some(pin) if !pin.trim().is_empty() => {
             let fingerprint = parse_fingerprint(pin)?;
             let config = rustls::ClientConfig::builder()
@@ -58,15 +61,10 @@ pub fn direct_plan(ws_url: &str, cert_sha256: Option<&str>, bearer: Option<Strin
                     provider: rustls::crypto::ring::default_provider(),
                 }))
                 .with_no_client_auth();
-            Some(Connector::Rustls(Arc::new(config)))
+            Ok(Some(Connector::Rustls(Arc::new(config))))
         }
-        _ => None,
-    };
-    Ok(DialPlan {
-        url: ws_url.to_string(),
-        connector,
-        bearer,
-    })
+        _ => Ok(None),
+    }
 }
 
 fn parse_fingerprint(pin: &str) -> Result<[u8; 32]> {
@@ -153,5 +151,31 @@ mod tests {
     #[test]
     fn direct_plan_rejects_malformed_fingerprint() {
         assert!(direct_plan("wss://x/ws", Some("not-hex-and-too-short"), None).is_err());
+    }
+
+    #[test]
+    fn relay_plan_pins_when_fingerprint_present() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let profile = Profile {
+            name: "cp".into(),
+            mode: ConnectionMode::Relay,
+            ws_url: "wss://kratos.kregel.host:8443/ws/dashboard".into(),
+            cert_sha256: Some("a".repeat(64)),
+        };
+        let plan = plan_for(&profile, Some("tok".into())).unwrap();
+        assert!(plan.connector.is_some(), "relay pin must produce a connector");
+        assert_eq!(plan.bearer.as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn relay_plan_uses_native_roots_without_pin() {
+        let profile = Profile {
+            name: "cp".into(),
+            mode: ConnectionMode::Relay,
+            ws_url: "wss://kratos.kregel.host:8443/ws/dashboard".into(),
+            cert_sha256: None,
+        };
+        let plan = plan_for(&profile, None).unwrap();
+        assert!(plan.connector.is_none(), "no pin means native roots");
     }
 }
