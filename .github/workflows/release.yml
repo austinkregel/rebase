@@ -6,10 +6,10 @@ name: Release
 # tauri.conf.json and the Cargo manifests at build time, so releasing never
 # requires a commit that bumps those five files.
 #
-# One release per tag, created as a draft by create-release, uploaded to by
-# every build job, and published by the final job only once all of them and the
-# updater manifest have succeeded. A failed run therefore leaves an invisible
-# draft rather than a public release advertising nothing.
+# One release per tag, created up front by create-release and then uploaded to
+# by every build job. It is published from the start and fills in as the
+# platforms finish, so a failed run leaves a release that is visibly short its
+# bundles rather than hiding one.
 on:
   push:
     tags: ['v*.*.*']
@@ -124,12 +124,13 @@ jobs:
 
           if [ "$count" -eq 1 ]; then
             id="$ids"
+            gh api "repos/$GITHUB_REPOSITORY/releases/$id" -X PATCH -F draft=false >/dev/null
             echo "::notice::Reusing release $id for $TAG"
           else
             id=$(gh api "repos/$GITHUB_REPOSITORY/releases" -X POST \
                    -f tag_name="$TAG" -f name="rebase $TAG" \
-                   -F draft=true -F prerelease=false --jq '.id')
-            echo "::notice::Created draft release $id for $TAG"
+                   -F draft=false -F prerelease=false --jq '.id')
+            echo "::notice::Created release $id for $TAG"
           fi
           echo "release_id=$id" >> "$GITHUB_OUTPUT"
 
@@ -301,26 +302,3 @@ jobs:
           # append a renamed duplicate on a re-run. --repo because gh otherwise
           # infers it from the git remote.
           gh release upload "$TAG" latest.json --clobber --repo "$GITHUB_REPOSITORY"
-
-  # The release is a draft until this point, and this job is the only thing that
-  # ever publishes it. Publishing up front meant a failed build left an empty
-  # release sitting at the top of the releases page advertising nothing — which
-  # is what v0.0.5 did, and it is still there. Now a failure leaves a draft
-  # nobody sees, and success leaves exactly one complete published release.
-  #
-  # This is not a draft anyone has to publish by hand; finishing the run is what
-  # publishes it.
-  publish:
-    name: Publish release
-    needs: [create-release, release, updater-manifest]
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
-        run: |
-          set -euo pipefail
-          url=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-                  -X PATCH -F draft=false --jq '.html_url')
-          echo "::notice::Published $url"
