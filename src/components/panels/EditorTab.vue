@@ -24,6 +24,7 @@ const files = useFilesStore()
 
 const api = computed(() => props.params.api)
 const path = computed(() => props.params.params?.path ?? '')
+const clientId = computed(() => props.params.params?.clientId ?? '')
 
 // `api.title` is a plain getter — it doesn't re-render when a panel renames
 // itself (e.g. a terminal adopting its name). Track dockview's title event so
@@ -35,7 +36,7 @@ onBeforeUnmount(() => stopTitle?.dispose())
 const title = computed(() => liveTitle.value || baseName(path.value) || path.value)
 const isEditor = computed(() => !!path.value) // editor tabs carry a path; terminals don't
 const dirty = computed(() => {
-  const f = files.openFiles.find((x) => x.path === path.value)
+  const f = files.openFiles.find((x) => x.clientId === clientId.value && x.path === path.value)
   return !!f && f.content !== f.savedContent
 })
 

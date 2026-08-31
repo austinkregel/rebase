@@ -12,7 +12,7 @@ import TerminalPanel from './panels/TerminalPanel.vue'
 import EditorTab from './panels/EditorTab.vue'
 import StatusTray from './StatusTray.vue'
 import IconButton from './ui/IconButton.vue'
-import { useFilesStore, type OpenFile } from '@/stores/files'
+import { useFilesStore, fileKey, parseFileKey, type OpenFile } from '@/stores/files'
 import { useSessionStore } from '@/stores/session'
 import { useAgentsStore } from '@/stores/agents'
 import { useProjectsStore } from '@/stores/projects'
@@ -126,19 +126,20 @@ const components = {
 const tabComponents = {
   editorTab: markRaw(EditorTab),
 }
-const LAYOUT_KEY = 'editor.v2'
-const LAYOUT_LEGACY_KEY = 'rebase.editor.v2'
+// v3: panel ids are now the composite fileKey(clientId, path), not the raw path,
+// so open files are identified per-server. Older layouts (editor.v2*) hold
+// path-only ids that would no longer reconcile, so they are intentionally not
+// migrated — the editor layout resets once and reopens from panel params.
+const LAYOUT_KEY = 'editor.v3'
 
 /** Persistence key for the current editor layout. In project mode each project
- *  keeps its own (`editor.v2:<id>`) so switching projects restores that
+ *  keeps its own (`editor.v3:<id>`) so switching projects restores that
  *  project's tabs instead of the shared fleet set. */
 function layoutKey(id: string | null = projects.focusedId): string {
   return id ? `${LAYOUT_KEY}:${id}` : LAYOUT_KEY
 }
 function loadLayoutFor(id: string | null): Promise<object | null> {
-  return id
-    ? loadValue<object | null>(layoutKey(id), null)
-    : loadValueMigrating<object | null>(LAYOUT_KEY, LAYOUT_LEGACY_KEY, null)
+  return loadValue<object | null>(layoutKey(id), null)
 }
 
 const dockApi = shallowRef<DockviewApi | null>(null)
@@ -154,16 +155,17 @@ function basename(p: string): string {
 }
 
 function addEditorPanel(api: DockviewApi, f: OpenFile) {
-  if (api.getPanel(f.path)) return
+  const id = fileKey(f.clientId, f.path)
+  if (api.getPanel(id)) return
   const within = editorGroupId && api.getGroup(editorGroupId)
   const panel = api.addPanel({
-    id: f.path,
+    id,
     component: 'editor',
     title: basename(f.path),
     params: { path: f.path, clientId: f.clientId },
     position: within ? { referenceGroup: editorGroupId as string, direction: 'within' } : undefined,
   })
-  editorIds.add(f.path)
+  editorIds.add(id)
   editorGroupId = panel.group?.id ?? editorGroupId
   editorEmpty.value = false
 }
@@ -217,8 +219,9 @@ async function onReady(event: DockviewReadyEvent) {
   // no blank editor tab and no terminal. Adopt whatever a saved layout restored.
   for (const p of api.panels) {
     if (p.id === 'terminal' || p.id.startsWith('terminal-')) {
-      const n = Number(p.id.split('-')[1] ?? 0)
-      if (n > terminalSeq) terminalSeq = n
+      // Legacy bare `terminal` (no seq) counts as 0; `terminal-<n>` parses to n.
+      const n = p.id === 'terminal' ? 0 : Number(p.id.split('-')[1])
+      if (Number.isFinite(n) && n > terminalSeq) terminalSeq = n
     } else {
       editorIds.add(p.id)
       editorGroupId = p.group?.id ?? editorGroupId
@@ -227,10 +230,13 @@ async function onReady(event: DockviewReadyEvent) {
   editorEmpty.value = api.panels.length === 0
 
   api.onDidRemovePanel((panel: IDockviewPanel) => {
-    if (editorIds.delete(panel.id)) files.closeFile(panel.id)
+    if (editorIds.delete(panel.id)) {
+      const { clientId, path } = parseFileKey(panel.id)
+      files.closeFile(clientId, path)
+    }
   })
   api.onDidActivePanelChange((panel) => {
-    if (panel && editorIds.has(panel.id)) files.activePath = panel.id
+    if (panel && editorIds.has(panel.id)) files.activeKey = panel.id
     setActiveTerminal(panel && panel.id.startsWith('terminal-') ? panel.id : null)
   })
   api.onDidLayoutChange(() => {
@@ -245,7 +251,7 @@ async function onReady(event: DockviewReadyEvent) {
 }
 
 watch(
-  () => files.openFiles.map((f) => f.path).join('\n'),
+  () => files.openFiles.map((f) => fileKey(f.clientId, f.path)).join('\n'),
   () => {
     const api = dockApi.value
     if (!api) return
@@ -253,9 +259,9 @@ watch(
   },
 )
 watch(
-  () => files.activePath,
-  (path) => {
-    if (path) dockApi.value?.getPanel(path)?.api.setActive()
+  () => files.activeKey,
+  (key) => {
+    if (key) dockApi.value?.getPanel(key)?.api.setActive()
   },
 )
 watch(
@@ -318,8 +324,8 @@ watch(
 // --- Command contributions (state lives here, so the commands do too) ---
 function closeActiveEditor() {
   const api = dockApi.value
-  if (!api || !files.activePath) return
-  const panel = api.getPanel(files.activePath)
+  if (!api || !files.activeKey) return
+  const panel = api.getPanel(files.activeKey)
   if (panel) api.removePanel(panel)
 }
 function closeAllEditors() {
@@ -337,7 +343,7 @@ onMounted(() => {
   disposeWorkbenchCommands = registerCommands([
     { id: 'view.toggleServers', title: 'Toggle Servers Sidebar', category: 'View', run: () => { serversOpen.value = !serversOpen.value } },
     { id: 'view.toggleTools', title: 'Toggle Tools Sidebar', category: 'View', run: () => { toolsOpen.value = !toolsOpen.value } },
-    { id: 'editor.closeActive', title: 'Close Editor', category: 'Editor', isEnabled: () => !!files.activePath, run: closeActiveEditor },
+    { id: 'editor.closeActive', title: 'Close Editor', category: 'Editor', isEnabled: () => !!files.activeKey, run: closeActiveEditor },
     { id: 'editor.closeAll', title: 'Close All Editors', category: 'Editor', isEnabled: () => editorIds.size > 0, run: closeAllEditors },
   ])
 })

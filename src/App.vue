@@ -46,7 +46,8 @@ onMounted(() => {
       category: 'File',
       isEnabled: () => !!files.activeFile,
       run: () => {
-        if (files.activePath) void files.saveFile(files.activePath)
+        const f = files.activeFile
+        if (f) void files.saveFile(f.clientId, f.path)
       },
     },
     {
@@ -56,7 +57,7 @@ onMounted(() => {
       isEnabled: () => files.dirtyCount > 0,
       run: () => {
         for (const f of files.openFiles) {
-          if (f.content !== f.savedContent) void files.saveFile(f.path)
+          if (f.content !== f.savedContent) void files.saveFile(f.clientId, f.path)
         }
       },
     },

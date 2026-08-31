@@ -9,6 +9,10 @@ vi.mock('@/services/fileService', () => ({
     rename: vi.fn(async () => {}),
     delete: vi.fn(async () => {}),
     read: vi.fn(async () => ''),
+    // openFile now classifies via fileContent.resolveOpen: stat (unknown here)
+    // then readBytes → empty bytes sniff as clean/editable text.
+    stat: vi.fn(async () => null),
+    readBytes: vi.fn(async () => new Uint8Array()),
   },
 }))
 vi.mock('@/stores/git', () => ({ useGitStore: () => ({ refresh: vi.fn() }) }))
@@ -181,5 +185,125 @@ describe('files store — offline agents', () => {
     await files.restore('c2')
     expect([...files.expandedSet('c2')].sort()).toEqual(['/srv/a', '/srv/b'])
     expect(fileService.list).not.toHaveBeenCalled()
+  })
+})
+
+describe('files store — open-file identity is per (server, path) (H3)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    useAgentsStore().onSocketStatus('open')
+    vi.clearAllMocks()
+  })
+
+  it('opens the same path on two servers as two independent buffers', async () => {
+    const files = useFilesStore()
+    await files.openFile('c1', '/proj/README.md')
+    await files.openFile('c2', '/proj/README.md')
+    expect(files.openFiles).toHaveLength(2)
+    // Active is the most-recently opened server's file, not a collided one.
+    expect(files.activeFile?.clientId).toBe('c2')
+    expect(files.isActive('c2', '/proj/README.md')).toBe(true)
+    expect(files.isActive('c1', '/proj/README.md')).toBe(false)
+  })
+
+  it('re-opening an already-open (server, path) just activates it', async () => {
+    const files = useFilesStore()
+    await files.openFile('c1', '/a.ts')
+    await files.openFile('c2', '/a.ts')
+    await files.openFile('c1', '/a.ts')
+    expect(files.openFiles).toHaveLength(2)
+    expect(files.activeFile?.clientId).toBe('c1')
+  })
+
+  it('edits and saves target the addressed server only', async () => {
+    const files = useFilesStore()
+    await files.openFile('c1', '/a.ts')
+    await files.openFile('c2', '/a.ts')
+    files.updateContent('c1', '/a.ts', 'from c1')
+    files.updateContent('c2', '/a.ts', 'from c2')
+    expect(files.openFiles.find((f) => f.clientId === 'c1')?.content).toBe('from c1')
+    expect(files.openFiles.find((f) => f.clientId === 'c2')?.content).toBe('from c2')
+    await files.saveFile('c2', '/a.ts')
+    expect(fileService.write).toHaveBeenCalledExactlyOnceWith('c2', '/a.ts', 'from c2')
+  })
+
+  it('closeFile closes only the matching server’s buffer', async () => {
+    const files = useFilesStore()
+    await files.openFile('c1', '/a.ts')
+    await files.openFile('c2', '/a.ts')
+    files.closeFile('c1', '/a.ts')
+    expect(files.openFiles).toHaveLength(1)
+    expect(files.openFiles[0].clientId).toBe('c2')
+  })
+})
+
+describe('files store — content classification gates editing (hazard fix)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    useAgentsStore().onSocketStatus('open')
+    vi.clearAllMocks()
+  })
+
+  it('a binary file opens read-only hex and never fills the buffer with decoded bytes', async () => {
+    vi.mocked(fileService.readBytes).mockResolvedValueOnce(new Uint8Array([0x00, 0x01, 0x02, 0x03]))
+    const files = useFilesStore()
+    await files.openFile('c1', '/a.bin')
+    expect(files.openFiles[0]).toMatchObject({ kind: 'binary-hex', editable: false, content: '' })
+  })
+
+  it('saveFile refuses a non-editable buffer even after an edit', async () => {
+    vi.mocked(fileService.readBytes).mockResolvedValueOnce(new Uint8Array([0x00, 0x01]))
+    const files = useFilesStore()
+    await files.openFile('c1', '/a.bin')
+    files.updateContent('c1', '/a.bin', 'evil')
+    await files.saveFile('c1', '/a.bin')
+    expect(fileService.write).not.toHaveBeenCalled()
+  })
+
+  it('a clean text file is editable and its content loads', async () => {
+    vi.mocked(fileService.readBytes).mockResolvedValueOnce(new TextEncoder().encode('hello'))
+    const files = useFilesStore()
+    await files.openFile('c1', '/a.txt')
+    expect(files.openFiles[0]).toMatchObject({ kind: 'text', editable: true, content: 'hello' })
+  })
+})
+
+describe('files store — directory rename/remove remaps descendants (M6)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    useAgentsStore().onSocketStatus('open')
+    vi.clearAllMocks()
+  })
+
+  it('renaming a directory remaps open child buffers, the active key, and expanded dirs', async () => {
+    const files = useFilesStore()
+    await files.openFile('c1', '/a/x.ts')
+    await files.openFile('c1', '/a/sub/y.ts') // becomes active
+    files.expandedSet('c1').add('/a/sub')
+    await files.renameEntry('c1', '/a', '/b', ['/'])
+    expect(files.openFiles.map((f) => f.path).sort()).toEqual(['/b/sub/y.ts', '/b/x.ts'])
+    expect(files.isActive('c1', '/b/sub/y.ts')).toBe(true)
+    expect([...files.expandedSet('c1')]).toContain('/b/sub')
+    expect([...files.expandedSet('c1')]).not.toContain('/a/sub')
+  })
+
+  it('rename does not touch a same-path buffer on another server', async () => {
+    const files = useFilesStore()
+    await files.openFile('c1', '/a/x.ts')
+    await files.openFile('c2', '/a/x.ts')
+    await files.renameEntry('c1', '/a', '/b', ['/'])
+    expect(files.isOpen('c1', '/b/x.ts')).toBe(true)
+    expect(files.isOpen('c2', '/a/x.ts')).toBe(true)
+  })
+
+  it('removing a directory closes buffers beneath it and collapses descendants', async () => {
+    const files = useFilesStore()
+    await files.openFile('c1', '/a/x.ts')
+    await files.openFile('c1', '/a/sub/y.ts')
+    await files.openFile('c1', '/keep.ts')
+    files.expandedSet('c1').add('/a/sub')
+    await files.removeEntry('c1', '/a', true, '/')
+    expect(files.openFiles.map((f) => f.path)).toEqual(['/keep.ts'])
+    expect([...files.expandedSet('c1')]).not.toContain('/a/sub')
   })
 })

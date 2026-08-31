@@ -10,6 +10,7 @@ import { viewerFor } from '@/services/viewers'
 import { mimeForPath } from '@/services/mime'
 import { notify } from '@/services/notifications'
 import { baseName } from '@/services/paths'
+import HexViewer from '@/components/viewers/HexViewer.vue'
 
 // One panel per open file. A content-aware viewer may claim the file by MIME
 // type (image/pdf/media/zip/markdown); otherwise it falls back to CodeMirror.
@@ -29,22 +30,35 @@ const host = ref<HTMLElement | null>(null)
 let view: EditorView | null = null
 let suppressChange = false
 
-const current = computed(() => files.openFiles.find((f) => f.path === path) ?? null)
+const current = computed(
+  () => files.openFiles.find((f) => f.clientId === clientId && f.path === path) ?? null,
+)
 const effectiveSettings = computed(() => settings.effective(projects.active?.editor))
 
 // The viewer (if any) is determined by the file's MIME type and is stable for
 // the panel's lifetime. `showSource` flips a toggle-capable viewer to the editor.
 const viewer = viewerFor(path)
 const showSource = ref(false)
-const showEditor = computed(() => !viewer || (showSource.value && !!viewer.allowRawToggle))
+// The store classifies the file (fileContent.resolveOpen) into a `kind`; the
+// panel routes on that, not on the extension. `editable` gates whether the
+// editor can write (clean text only).
+const kind = computed(() => current.value?.kind ?? 'text')
+const editable = computed(() => !!current.value?.editable)
+const isHex = computed(() => kind.value === 'binary-hex')
+const isBanner = computed(
+  () => kind.value === 'special' || kind.value === 'directory' || kind.value === 'too-large',
+)
+const showViewer = computed(
+  () => !!viewer && (kind.value === 'binary-viewer' || kind.value === 'text-viewer') && !showSource.value,
+)
 
 function handleChange(doc: string) {
-  if (!suppressChange) files.updateContent(path, doc)
+  if (!suppressChange) files.updateContent(clientId, path, doc)
 }
 
 async function handleSave() {
   try {
-    await files.saveFile(path)
+    await files.saveFile(clientId, path)
   } catch (err) {
     notify.error(`Couldn't save ${baseName(path)}`, {
       source: 'Editor',
@@ -59,7 +73,13 @@ function loadDoc() {
   const doc = f && !f.loading && !f.error ? f.content : ''
   suppressChange = true
   view.setState(
-    createEditorState({ doc, onChange: handleChange, onSave: handleSave, settings: effectiveSettings.value }),
+    createEditorState({
+      doc,
+      onChange: handleChange,
+      onSave: handleSave,
+      settings: effectiveSettings.value,
+      readOnly: !editable.value,
+    }),
   )
   suppressChange = false
   void languageFor(path).then((ext) => {
@@ -100,16 +120,15 @@ watch(
   { deep: true },
 )
 
-// Push freshly-read content into the live view once the async read completes.
+// Once the async classify+read completes, rebuild the state so both the content
+// AND the correct read-only mode (editable was unknown while loading) apply.
 watch(
   () => current.value?.loading,
   (loading, wasLoading) => {
     if (!view || loading || !wasLoading) return
     const f = current.value
     if (!f || f.error) return
-    suppressChange = true
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: f.content } })
-    suppressChange = false
+    loadDoc()
   },
 )
 </script>
@@ -124,26 +143,40 @@ watch(
       </button>
     </div>
 
-    <!-- Editor branch: plain text files, or a viewer's "View Source". -->
-    <template v-if="showEditor">
-      <div v-if="current?.loading" class="editor-banner">loading content…</div>
-      <div v-else-if="current?.error" class="editor-banner error">
-        <span class="msg">{{ current.error }}</span>
-        <button class="retry" @click="files.reloadFile(path)">Retry</button>
-      </div>
-      <div ref="host" class="editor-host" />
-    </template>
+    <!-- Loading / error apply to every kind. -->
+    <div v-if="current?.loading" class="editor-banner">loading content…</div>
+    <div v-else-if="current?.error" class="editor-banner error">
+      <span class="msg">{{ current.error }}</span>
+      <button class="retry" @click="files.reloadFile(clientId, path)">Retry</button>
+    </div>
 
-    <!-- Viewer branch: content-aware rendering. -->
+    <!-- Read-only hex for binary / lossy content. -->
+    <HexViewer
+      v-else-if="isHex"
+      class="viewer-host"
+      :path="path"
+      :client-id="clientId"
+      :size="current?.size ?? -1"
+    />
+
+    <!-- Not openable as text/viewer: directory, special file, or too large. -->
+    <div v-else-if="isBanner" class="editor-banner info">
+      <span class="msg">{{ current?.reason ?? 'This file can’t be opened here.' }}</span>
+    </div>
+
+    <!-- Content-aware viewer (image/pdf/media/zip/markdown/svg). -->
     <component
       :is="viewer.component"
-      v-else-if="viewer"
+      v-else-if="showViewer && viewer"
       class="viewer-host"
       :path="path"
       :client-id="clientId"
       :mime="mime"
       :content="current?.content ?? ''"
     />
+
+    <!-- Editor: editable text, or a read-only preview (editable === false). -->
+    <div v-else ref="host" class="editor-host" />
   </div>
 </template>
 

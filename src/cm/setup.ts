@@ -139,6 +139,8 @@ export interface CreateStateOptions {
   onChange?: (doc: string) => void
   onSave?: () => void
   settings?: EditorSettings
+  /** Read-only: for binary/oversized/truncated previews that must not be edited. */
+  readOnly?: boolean
 }
 
 // Language starts empty; the editor reconfigures the compartment once the
@@ -149,10 +151,12 @@ export function createEditorState({
   onChange,
   onSave,
   settings = defaultEditorSettings,
+  readOnly = false,
 }: CreateStateOptions): EditorState {
   return EditorState.create({
     doc,
     extensions: [
+      ...(readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
       highlightSpecialChars(),
       history(),
       drawSelection(),

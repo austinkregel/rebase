@@ -3,8 +3,8 @@ import { fileService } from '@/services/fileService'
 import { AgentOfflineError, useAgentsStore } from '@/stores/agents'
 import { useGitStore } from '@/stores/git'
 import { useProjectsStore } from '@/stores/projects'
-import { normalizeRoot } from '@/services/paths'
-import { viewerFor } from '@/services/viewers'
+import { baseName, isWindowsPath, normalizeRoot, parentDir } from '@/services/paths'
+import { resolveOpen, type FileContentKind, type FileSpecial } from '@/services/fileContent'
 import { loadValue, saveValue } from '@/services/store'
 import type { DirListEntry } from '@/transport/types'
 
@@ -17,6 +17,39 @@ const EXPANDED_KEY = 'tree-expanded'
 /** Persisted shape of the expanded map: clientId → expanded paths. */
 type ExpandedByClient = Record<string, string[]>
 
+/**
+ * Composite identity for an open file: a *server's* file, not just a path. The
+ * Project explorer shows roots from several servers at once, so the same
+ * absolute path can be open on two agents — keying by path alone collides
+ * (opening /etc/hosts on B would surface A's buffer). Mirrors the `\0` key
+ * convention used elsewhere (ProjectsManager). This string is also the Dockview
+ * panel id, so `activeKey` and a panel id are interchangeable.
+ */
+export function fileKey(clientId: string, path: string): string {
+  return `${clientId}\0${path}`
+}
+
+/** Inverse of {@link fileKey}. A key without a separator is treated as path-only. */
+export function parseFileKey(key: string): { clientId: string; path: string } {
+  const i = key.indexOf('\0')
+  return i === -1 ? { clientId: '', path: key } : { clientId: key.slice(0, i), path: key.slice(i + 1) }
+}
+
+/** Directory separator matching a path's OS style. */
+function sepFor(path: string): string {
+  return isWindowsPath(path) ? '\\' : '/'
+}
+
+/** True when `path` is `dir` itself or lives beneath it. */
+function isUnder(path: string, dir: string): boolean {
+  return path === dir || path.startsWith(dir + sepFor(dir))
+}
+
+/** Re-root a path from under `oldDir` to under `newDir` (dir move/rename). */
+function reparent(path: string, oldDir: string, newDir: string): string {
+  return newDir + path.slice(oldDir.length)
+}
+
 export interface OpenFile {
   path: string
   clientId: string
@@ -26,9 +59,20 @@ export interface OpenFile {
   savedContent: string
   loading: boolean
   error: string | null
+  /** How the file is opened (editor / viewer / hex / preview) — see fileContent. */
+  kind: FileContentKind
+  /** True only for clean, losslessly-UTF-8 text within the editable size cap. */
+  editable: boolean
+  /** Preview is shorter than the whole file (oversized/paged). */
+  truncated: boolean
+  size: number
+  mode?: string
+  special?: FileSpecial
+  /** Banner text explaining a read-only / not-shown state. */
+  reason?: string
   /** Id of the content-aware viewer rendering this file (undefined → editor). */
   viewerId?: string
-  /** Binary-backed viewers load their own bytes and can't be edited/saved. */
+  /** Convenience mirror of `!editable` for existing call sites. */
   readOnly?: boolean
 }
 
@@ -41,7 +85,8 @@ export const useFilesStore = defineStore('files', {
     /** Expanded directory paths, keyed by clientId (persisted as arrays). */
     expanded: {} as Record<string, Set<string>>,
     openFiles: [] as OpenFile[],
-    activePath: null as string | null,
+    /** The active open file, identified by fileKey(clientId, path) — see fileKey. */
+    activeKey: null as string | null,
     /** The File explorer's current root — a single, ad-hoc browse location
      *  (not persisted; the persisted multi-root workspace lives on projects). */
     browseRoot: '/',
@@ -49,7 +94,7 @@ export const useFilesStore = defineStore('files', {
 
   getters: {
     activeFile(state): OpenFile | null {
-      return state.openFiles.find((f) => f.path === state.activePath) ?? null
+      return state.openFiles.find((f) => fileKey(f.clientId, f.path) === state.activeKey) ?? null
     },
     isDirty: () => (file: OpenFile) => file.content !== file.savedContent,
     dirtyCount(state): number {
@@ -69,6 +114,16 @@ export const useFilesStore = defineStore('files', {
       return (clientId: string | null, path: string): boolean =>
         !!clientId && !!state.expanded[clientId]?.has(path)
     },
+    /** Whether a given agent's file is open. */
+    isOpen(state) {
+      return (clientId: string, path: string): boolean =>
+        state.openFiles.some((f) => f.clientId === clientId && f.path === path)
+    },
+    /** Whether a given agent's file is the active one. */
+    isActive(state) {
+      return (clientId: string, path: string): boolean =>
+        state.activeKey === fileKey(clientId, path)
+    },
   },
 
   actions: {
@@ -79,14 +134,14 @@ export const useFilesStore = defineStore('files', {
     reset() {
       this.tree = {}
       this.openFiles = []
-      this.activePath = null
+      this.activeKey = null
     },
 
     /** Close every buffer, keeping cached listings — used when switching agents,
      *  where other servers' trees must survive for the Project explorer. */
     closeAllFiles() {
       this.openFiles = []
-      this.activePath = null
+      this.activeKey = null
     },
 
     /** The (created-on-demand) expanded set for an agent. */
@@ -145,6 +200,10 @@ export const useFilesStore = defineStore('files', {
         throw new AgentOfflineError(clientId, agents.displayName(clientId))
       }
       const entries = await fileService.list(clientId, path)
+      // The socket may have dropped (and reset() wiped the tree) while we awaited;
+      // writing now would repopulate a now-unreachable server's tree with a stale
+      // listing. Bail if the agent went offline mid-list.
+      if (!agents.isOnline(clientId)) return
       // Directories first, then files, both alphabetical.
       entries.sort((a, b) =>
         a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1,
@@ -187,37 +246,49 @@ export const useFilesStore = defineStore('files', {
     },
 
     async openFile(clientId: string, path: string) {
-      const existing = this.openFiles.find((f) => f.path === path)
+      const existing = this.openFiles.find((f) => f.clientId === clientId && f.path === path)
       if (existing) {
-        this.activePath = path
+        this.activeKey = fileKey(clientId, path)
         return
       }
-      // A content-aware viewer may claim this file by MIME type. Binary-backed
-      // viewers (image/pdf/media/zip) load their own bytes — skip the text read
-      // and mark the buffer read-only. Text-backed viewers (markdown) still read
-      // the text so the viewer can render it and the source toggle can edit it.
-      const viewer = viewerFor(path)
+      // Placeholder buffer; fileContent.resolveOpen classifies the file (from
+      // metadata + a content sniff, never the extension alone) and returns text
+      // only for clean, editable text — so a binary/unknown file can no longer
+      // land in an editable buffer and be corrupted on save.
       const file: OpenFile = {
         path,
         clientId,
         content: '',
         savedContent: '',
-        loading: !viewer?.binary,
+        loading: true,
         error: null,
-        viewerId: viewer?.id,
-        readOnly: viewer?.binary || undefined,
+        kind: 'text',
+        editable: false,
+        truncated: false,
+        size: -1,
       }
       this.openFiles.push(file)
       // Mutate the reactive proxy stored in the array, NOT the local `file`
       // literal — writes to the raw object don't trigger reactivity, so the
       // editor would never see `loading` flip to false (stuck "loading…").
       const entry = this.openFiles[this.openFiles.length - 1]
-      this.activePath = path
-      if (viewer?.binary) return
+      this.activeKey = fileKey(clientId, path)
       try {
-        const content = await fileService.read(clientId, path)
-        entry.content = content
-        entry.savedContent = content
+        const known = this.entriesFor(clientId, parentDir(path))?.find((e) => e.name === baseName(path))
+        const { plan, content } = await resolveOpen(clientId, path, known)
+        entry.kind = plan.kind
+        entry.editable = plan.editable
+        entry.readOnly = plan.editable ? undefined : true
+        entry.truncated = plan.truncated
+        entry.size = plan.size
+        entry.mode = plan.mode
+        entry.special = plan.special
+        entry.reason = plan.reason
+        entry.viewerId = plan.viewerId
+        if (content != null) {
+          entry.content = content
+          entry.savedContent = content
+        }
       } catch (err) {
         entry.error = err instanceof Error ? err.message : String(err)
       } finally {
@@ -225,21 +296,29 @@ export const useFilesStore = defineStore('files', {
       }
     },
 
-    updateContent(path: string, content: string) {
-      const file = this.openFiles.find((f) => f.path === path)
+    updateContent(clientId: string, path: string, content: string) {
+      const file = this.openFiles.find((f) => f.clientId === clientId && f.path === path)
       if (file) file.content = content
     },
 
-    /** Re-read an already-open file's content (used by the editor's Retry). */
-    async reloadFile(path: string) {
-      const file = this.openFiles.find((f) => f.path === path)
-      if (!file || file.readOnly) return
+    /** Re-read an already-open file's content (used by the editor's Retry),
+     *  re-classifying in case the file changed type/size. */
+    async reloadFile(clientId: string, path: string) {
+      const file = this.openFiles.find((f) => f.clientId === clientId && f.path === path)
+      if (!file) return
       file.loading = true
       file.error = null
       try {
-        const content = await fileService.read(file.clientId, path)
-        file.content = content
-        file.savedContent = content
+        const { plan, content } = await resolveOpen(clientId, path)
+        file.kind = plan.kind
+        file.editable = plan.editable
+        file.readOnly = plan.editable ? undefined : true
+        file.truncated = plan.truncated
+        file.size = plan.size
+        file.reason = plan.reason
+        file.viewerId = plan.viewerId
+        file.content = content ?? ''
+        file.savedContent = content ?? ''
       } catch (err) {
         file.error = err instanceof Error ? err.message : String(err)
       } finally {
@@ -247,12 +326,12 @@ export const useFilesStore = defineStore('files', {
       }
     },
 
-    async saveFile(path: string) {
-      const file = this.openFiles.find((f) => f.path === path)
-      // Never save while loading or when the content failed to load — that would
-      // clobber the file with an empty/partial buffer. Binary viewer buffers are
-      // read-only and have no text content to write.
-      if (!file || file.loading || file.error || file.readOnly) return
+    async saveFile(clientId: string, path: string) {
+      const file = this.openFiles.find((f) => f.clientId === clientId && f.path === path)
+      // Only clean, editable text may be written back. Loading/errored buffers
+      // would clobber the file with a partial/empty write; binary, hex, oversized,
+      // and viewer buffers are read-only (editable === false).
+      if (!file || file.loading || file.error || !file.editable) return
       const snapshot = file.content
       await fileService.write(file.clientId, file.path, snapshot)
       file.savedContent = snapshot
@@ -277,35 +356,60 @@ export const useFilesStore = defineStore('files', {
       await this.openFile(clientId, path)
     },
 
-    /** Rename/move an entry, fix any open buffers, and refresh affected dirs. */
+    /** Rename/move an entry, fix any open buffers (including those beneath a
+     *  renamed directory), and refresh affected dirs. */
     async renameEntry(clientId: string, oldPath: string, newPath: string, reloadDirs: string[]) {
       await fileService.rename(clientId, oldPath, newPath)
+      // Remap the entry itself and every open buffer under it (dir rename).
       for (const f of this.openFiles) {
-        if (f.path === oldPath) f.path = newPath
+        if (f.clientId === clientId && isUnder(f.path, oldPath)) {
+          const from = f.path
+          f.path = reparent(f.path, oldPath, newPath)
+          if (this.activeKey === fileKey(clientId, from)) {
+            this.activeKey = fileKey(clientId, f.path)
+          }
+        }
       }
-      if (this.activePath === oldPath) this.activePath = newPath
+      // Remap expanded dirs at/under oldPath so children aren't orphaned.
       const expanded = this.expandedSet(clientId)
-      if (expanded.delete(oldPath)) {
-        expanded.add(newPath)
-        this.persistExpanded()
+      let changed = false
+      for (const p of [...expanded]) {
+        if (isUnder(p, oldPath)) {
+          expanded.delete(p)
+          expanded.add(reparent(p, oldPath, newPath))
+          changed = true
+        }
       }
+      if (changed) this.persistExpanded()
       for (const dir of new Set(reloadDirs)) await this.loadDir(clientId, dir)
     },
 
-    /** Delete an entry, close it if open, and refresh its parent listing. */
+    /** Delete an entry, close it and anything open beneath it, collapse its
+     *  descendants, and refresh its parent listing. */
     async removeEntry(clientId: string, path: string, recursive: boolean, reloadDir: string) {
       await fileService.delete(clientId, path, recursive)
-      this.closeFile(path)
-      this.collapse(clientId, path)
+      for (const f of [...this.openFiles]) {
+        if (f.clientId === clientId && isUnder(f.path, path)) this.closeFile(clientId, f.path)
+      }
+      const expanded = this.expandedSet(clientId)
+      let changed = false
+      for (const p of [...expanded]) {
+        if (isUnder(p, path)) {
+          expanded.delete(p)
+          changed = true
+        }
+      }
+      if (changed) this.persistExpanded()
       await this.loadDir(clientId, reloadDir)
     },
 
-    closeFile(path: string) {
-      const index = this.openFiles.findIndex((f) => f.path === path)
+    closeFile(clientId: string, path: string) {
+      const index = this.openFiles.findIndex((f) => f.clientId === clientId && f.path === path)
       if (index === -1) return
       this.openFiles.splice(index, 1)
-      if (this.activePath === path) {
-        this.activePath = this.openFiles[Math.min(index, this.openFiles.length - 1)]?.path ?? null
+      if (this.activeKey === fileKey(clientId, path)) {
+        const next = this.openFiles[Math.min(index, this.openFiles.length - 1)]
+        this.activeKey = next ? fileKey(next.clientId, next.path) : null
       }
     },
   },

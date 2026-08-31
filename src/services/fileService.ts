@@ -1,6 +1,7 @@
 import { socket } from '@/transport/socket'
 import { Rpc, RpcTimeoutError, newRequestId } from '@/transport/rpc'
 import { base64ToBytes, bytesToBase64, decodeText, encodeText } from '@/transport/encoding'
+import { baseName, parentDir } from '@/services/paths'
 import type {
   DirListEntry,
   DirListResponse,
@@ -12,6 +13,7 @@ import type {
   FileMkdirResult,
   FilePutResult,
   FileRenameResult,
+  ReadRange,
 } from '@/transport/types'
 
 export class FileOpError extends Error {
@@ -28,6 +30,29 @@ const READ_TIMEOUT_MS = 30_000
 /** Ceiling for binary viewer reads — the whole file buffers in memory to build
  *  a Blob URL, so cap it. Text reads are unbounded (source files are small). */
 const MAX_BINARY_BYTES = 50 * 1024 * 1024
+/** Upload result timeout: the single deadline must cover streaming every chunk,
+ *  the agent's disk write, and the finish round-trip — so scale it with size on
+ *  top of a floor, instead of the fixed 20s that fails large uploads. */
+const WRITE_TIMEOUT_BASE_MS = 30_000
+/** Assumed floor throughput for sizing the upload timeout (~1 MB/s). */
+const WRITE_MIN_BYTES_PER_MS = 1024
+
+export function writeTimeoutFor(byteLength: number): number {
+  return WRITE_TIMEOUT_BASE_MS + Math.ceil(byteLength / WRITE_MIN_BYTES_PER_MS)
+}
+
+/** Default ceiling for text reads — source files are small; this only guards
+ *  against buffering a pathologically large file into a string. */
+const MAX_TEXT_BYTES = 25 * 1024 * 1024
+
+/** Decoded byte length of a standard (newline-free) base64 string, without
+ *  decoding it — used to enforce the read cap as chunks stream in. */
+function base64DecodedLength(b64: string): number {
+  const len = b64.length
+  if (len === 0) return 0
+  const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0
+  return Math.floor((len * 3) / 4) - padding
+}
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -106,9 +131,10 @@ export class FileService {
 
   /** Stat by listing the parent — the protocol has no dedicated stat. */
   async stat(clientId: string, path: string): Promise<DirListEntry | null> {
-    const slash = path.lastIndexOf('/')
-    const parent = slash > 0 ? path.slice(0, slash) : '/'
-    const name = path.slice(slash + 1)
+    // OS-aware parent/name split (the agent's paths may be Windows-style, and a
+    // trailing slash must not yield an empty name).
+    const parent = parentDir(path)
+    const name = baseName(path)
     const entries = await this.list(clientId, parent)
     return entries.find((e) => e.name === name) ?? null
   }
@@ -119,7 +145,44 @@ export class FileService {
    * server and agent support it.
    */
   async read(clientId: string, path: string): Promise<string> {
-    return decodeText(await this.fetchBytes(clientId, path))
+    return decodeText((await this.fetchBytes(clientId, path, MAX_TEXT_BYTES)).bytes)
+  }
+
+  /**
+   * Read a byte window `[offset, offset+length)` of a file. Requires an agent
+   * advertising the `file_get.range` capability — callers MUST gate on
+   * `useAgentsStore().supports(clientId, 'file_get.range')` first; this method
+   * additionally rejects loudly if the agent turns out to have ignored the range
+   * (streamed the whole file) rather than silently returning wrong data.
+   */
+  async readRange(
+    clientId: string,
+    path: string,
+    offset: number,
+    length: number,
+    timeoutMs = READ_TIMEOUT_MS,
+  ): Promise<ReadRange> {
+    const { bytes, result } = await this.fetchBytes(clientId, path, length, timeoutMs, { offset, length })
+    // A new agent that explicitly rejects a range returns ok:false — already
+    // surfaced loudly by fetchBytes. An OLD agent silently ignores the unknown
+    // offset/length and streams the whole file from 0, returning none of the
+    // ranged-read result fields; detect that and fail loud rather than hand back
+    // the wrong bytes as if they were the window.
+    const hasRangeFields = result.offset != null || result.returned != null || result.eof != null
+    if (offset > 0 && !hasRangeFields) {
+      throw new FileOpError(
+        'read',
+        path,
+        `agent "${clientId}" streamed the whole file instead of the requested byte range — its compute-agent lacks ranged file_get (offset/length); redeploy the agent on that server`,
+      )
+    }
+    return {
+      bytes,
+      offset: result.offset ?? offset,
+      size: result.size ?? -1,
+      eof: result.eof ?? true,
+      truncated: result.truncated ?? false,
+    }
   }
 
   /**
@@ -134,21 +197,43 @@ export class FileService {
     maxBytes = MAX_BINARY_BYTES,
     timeoutMs = READ_TIMEOUT_MS,
   ): Promise<Uint8Array> {
-    return this.fetchBytes(clientId, path, maxBytes, timeoutMs)
+    return (await this.fetchBytes(clientId, path, maxBytes, timeoutMs)).bytes
   }
 
-  /** Stream the chunked `file_get` download and reassemble the raw bytes. */
+  /** Stream the chunked `file_get` download and reassemble the raw bytes. When
+   *  `range` is set (ranged read), `offset`/`length` are sent on the request and
+   *  the terminal result is returned so the caller can read the range metadata. */
   private async fetchBytes(
     clientId: string,
     path: string,
     maxBytes?: number,
     timeoutMs = READ_TIMEOUT_MS,
-  ): Promise<Uint8Array> {
+    range?: { offset: number; length?: number },
+  ): Promise<{ bytes: Uint8Array; result: FileGetResult }> {
     const requestId = newRequestId()
     const chunks: FileGetChunk[] = []
+    const tooLarge = (size: number) =>
+      new FileOpError(
+        'read',
+        path,
+        `file is ${formatBytes(size)} — too large to open here (limit ${formatBytes(maxBytes ?? 0)})`,
+      )
 
+    // Subscribe for the terminal result with a cancel handle so the chunk
+    // handler can abort the moment the running total exceeds maxBytes — the
+    // point of the cap is to NOT buffer an unbounded blob, so it must fire
+    // during accumulation, not after the whole file is in memory.
+    const { promise: resultPromise, cancel: cancelResult } =
+      this.rpc.nextCancelable<FileGetResult>('file_get_result', requestId, { timeoutMs })
+
+    let received = 0
     const stopChunks = this.rpc.expect('file_get_chunk', requestId, (data) => {
-      chunks.push(data as unknown as FileGetChunk)
+      const chunk = data as unknown as FileGetChunk
+      chunks.push(chunk)
+      if (maxBytes != null) {
+        received += base64DecodedLength(chunk.data)
+        if (received > maxBytes) cancelResult(tooLarge(received))
+      }
     })
     // The control plane emits `file_get_dispatched` the instant it forwards the
     // request to the agent. Tracking it lets a timeout pinpoint the stale hop:
@@ -158,20 +243,25 @@ export class FileService {
     const stopDispatched = this.rpc.expect('file_get_dispatched', requestId, () => {
       dispatched = true
     })
+    if (
+      !socket.emit('file_get_request', {
+        clientId,
+        requestId,
+        path,
+        ...(maxBytes != null ? { maxSize: maxBytes } : {}),
+        ...(range ? { offset: range.offset, ...(range.length != null ? { length: range.length } : {}) } : {}),
+      })
+    ) {
+      cancelResult(new Error('Not connected to control plane'))
+    }
+    let result: FileGetResult
     try {
-      const result = await this.rpc.call<FileGetResult>(
-        'file_get_request',
-        'file_get_result',
-        { clientId, requestId, path, ...(maxBytes != null ? { maxSize: maxBytes } : {}) },
-        { timeoutMs },
-      )
+      result = await resultPromise
       if (!result.ok) throw new FileOpError('read', path, result.error ?? 'unknown error')
-      if (maxBytes != null && result.size != null && result.size > maxBytes) {
-        throw new FileOpError(
-          'read',
-          path,
-          `file is ${formatBytes(result.size)} — too large to open here (limit ${formatBytes(maxBytes)})`,
-        )
+      // A non-ranged read caps on the total file size; a ranged read is bounded
+      // by its window, so only guard the whole-file case here.
+      if (!range && maxBytes != null && result.size != null && result.size > maxBytes) {
+        throw tooLarge(result.size)
       }
     } catch (err) {
       if (err instanceof RpcTimeoutError) {
@@ -193,12 +283,12 @@ export class FileService {
     const parts = chunks.map((c) => base64ToBytes(c.data))
     const total = parts.reduce((n, p) => n + p.length, 0)
     const bytes = new Uint8Array(total)
-    let offset = 0
+    let pos = 0
     for (const part of parts) {
-      bytes.set(part, offset)
-      offset += part.length
+      bytes.set(part, pos)
+      pos += part.length
     }
-    return bytes
+    return { bytes, result }
   }
 
   /**
@@ -211,12 +301,14 @@ export class FileService {
   }
 
   /** Write raw bytes (e.g. an uploaded binary) via the chunked upload flow, with
-   *  an optional unix mode string ("0755") applied on creation. */
+   *  an optional unix mode string ("0755") applied on creation. `timeoutMs`
+   *  defaults to a size-scaled budget covering the whole stream + write + finish. */
   async writeBytes(
     clientId: string,
     path: string,
     bytes: Uint8Array,
     mode?: string,
+    timeoutMs = writeTimeoutFor(bytes.length),
   ): Promise<void> {
     const requestId = newRequestId()
 
@@ -233,15 +325,27 @@ export class FileService {
 
     // The final result arrives only after finish, but a failed chunk emits an
     // early ok:false frame — subscribe before streaming so neither is missed.
-    const finished = this.rpc.next<FilePutResult>('file_put_result', requestId)
+    // Keep the cancel handle: if a chunk emit fails mid-stream we must tear this
+    // subscription down, else its listener leaks and its timer later rejects a
+    // promise no one holds (unhandled rejection).
+    const { promise: finished, cancel } = this.rpc.nextCancelable<FilePutResult>(
+      'file_put_result',
+      requestId,
+      { timeoutMs },
+    )
 
+    let failed = false
     for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
       const chunk = bytes.subarray(offset, offset + CHUNK_BYTES)
       if (!socket.emit('file_put_chunk', { clientId, requestId, offset, data: bytesToBase64(chunk) })) {
-        throw new FileOpError('write', path, 'connection lost mid-upload')
+        // Settle `finished` via cancel and let the single await below surface the
+        // rejection — throwing separately would leave `finished` unawaited.
+        cancel(new FileOpError('write', path, 'connection lost mid-upload'))
+        failed = true
+        break
       }
     }
-    socket.emit('file_put_finish', { clientId, requestId })
+    if (!failed) socket.emit('file_put_finish', { clientId, requestId })
 
     const result = await finished
     if (!result.ok) throw new FileOpError('write', path, result.error ?? 'upload failed')
