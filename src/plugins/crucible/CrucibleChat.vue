@@ -18,6 +18,7 @@ import { rebuild } from '@/services/crucible'
 import { turnsFor, pinsFor, removePin, indexStateFor, conversationListFor, activeConversationIdFor, type Citation } from '@/services/crucibleState'
 import SectionHeader from '@/components/ui/SectionHeader.vue'
 import Button from '@/components/ui/Button.vue'
+import ActionButton from '@/components/ui/ActionButton.vue'
 import IconButton from '@/components/ui/IconButton.vue'
 import TranscriptTurn from './TranscriptTurn.vue'
 import { activityKey, basename, groupTurns } from './transcript'
@@ -138,6 +139,31 @@ function openCitation(c: Citation) {
 function refresh() {
   if (project.value) void rebuild(project.value)
 }
+
+// Map the 7-phase index machine onto the button's four states, with a distinct
+// in-flight label per phase so the long build reports what it's doing.
+const indexActionState = computed(() => {
+  switch (index.value.phase) {
+    case 'uploading':
+    case 'building':
+    case 'packing':
+    case 'downloading':
+      return 'pending' as const
+    case 'ready':
+      return 'success' as const
+    case 'error':
+      return 'error' as const
+    default:
+      return 'idle' as const
+  }
+})
+const PHASE_LABELS: Record<string, string> = {
+  uploading: 'Uploading indexer…',
+  building: 'Building index…',
+  packing: 'Packing…',
+  downloading: 'Downloading…',
+}
+const indexPhaseLabel = computed(() => PHASE_LABELS[index.value.phase])
 </script>
 
 <template>
@@ -208,7 +234,16 @@ function refresh() {
           <p v-if="!hasIndex" class="text-xs">
             Build an index so answers are grounded in this project.
           </p>
-          <Button v-if="!hasIndex" variant="primary" @click="refresh">Build index</Button>
+          <ActionButton
+            v-if="!hasIndex"
+            label="Build index"
+            :states="{ success: 'Index built', error: 'Build failed' }"
+            :state="indexActionState"
+            :phase-label="indexPhaseLabel"
+            variant="primary"
+            @trigger="refresh"
+            @retry="refresh"
+          />
         </div>
 
         <TranscriptTurn

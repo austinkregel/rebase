@@ -3,3 +3,4 @@
 - [Terminal overhaul spec](terminal-overhaul-spec.md) — approved UX spec for terminal polish + manager + context menus (2026-06-13)
 - [Terminal reconnect spec](terminal-reconnect-spec.md) — UX decisions for reconnect/resume, env/login-shell config, resilience affordances (2026-06-14)
 - [Crucible chat architecture](crucible-chat-architecture.md) — agent loop appends one turn per iteration; groupedTurns pattern + tool card conventions (2026-06-16)
+- [ActionButton system](action-button-proposal.md) — shipped ActionButton.vue/Spinner.vue/conjugate.ts APIs + open review findings (Spinner double-announce, icon size scaling) (2026-08-24)

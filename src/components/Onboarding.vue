@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { ArrowRightEndOnRectangleIcon } from '@heroicons/vue/20/solid'
 import { useSessionStore } from '@/stores/session'
 import Button from '@/components/ui/Button.vue'
+import ActionButton from '@/components/ui/ActionButton.vue'
 
 const session = useSessionStore()
 const showFallback = ref(false)
@@ -10,10 +11,8 @@ const mode = ref<'client' | 'token'>('client')
 const token = ref('')
 const clientId = ref('')
 const clientSecret = ref('')
-const busy = ref(false)
 
 async function submitFallback() {
-  busy.value = true
   if (mode.value === 'token') {
     await session.setCredentials({ token: token.value.trim() })
   } else {
@@ -22,7 +21,10 @@ async function submitFallback() {
       clientSecret: clientSecret.value.trim(),
     })
   }
-  busy.value = false
+  // setCredentials swallows failures into session.error; surface it as a
+  // rejection so the button reaches its error state (the detail still shows
+  // below). On success the session advances and this screen unmounts.
+  if (session.error) throw new Error(session.error)
 }
 
 const field =
@@ -45,7 +47,7 @@ const field =
         {{ showFallback ? 'Hide' : 'Use a token instead' }}
       </Button>
 
-      <form v-if="showFallback" class="mt-2 flex flex-col gap-2" @submit.prevent="submitFallback">
+      <form v-if="showFallback" class="mt-2 flex flex-col gap-2" @submit.prevent>
         <div class="flex gap-1">
           <button
             type="button"
@@ -69,9 +71,15 @@ const field =
           <input v-model="clientSecret" type="password" :class="field" placeholder="client_secret" autocomplete="off" />
         </template>
         <textarea v-else v-model="token" rows="3" :class="field" placeholder="paste machine token (JWT)" spellcheck="false" />
-        <Button variant="primary" size="md" block type="submit" :disabled="busy">
-          {{ busy ? 'saving…' : 'Save & continue' }}
-        </Button>
+        <ActionButton
+          label="Save & continue"
+          :states="{ pending: 'Saving…', success: 'Saved', error: 'Save failed' }"
+          variant="primary"
+          size="md"
+          block
+          type="submit"
+          :action="submitFallback"
+        />
       </form>
     </template>
 
